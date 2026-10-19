@@ -73,7 +73,7 @@ test(
     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
     const websocket = new WebSocketServer({ server });
     websocket.on("connection", (socket) =>
-      socket.on("message", (data) => socket.send(data.toString())),
+      socket.on("message", (data, binary) => socket.send(data, { binary })),
     );
     const base = `http://127.0.0.1:${server.address().port}`;
     await writeFile(
@@ -261,22 +261,29 @@ test(
     const wsResult = await cdp.send(
       "Runtime.evaluate",
       {
-        expression: `new Promise((resolve,reject)=>{const ws=new WebSocket(${JSON.stringify(wsUrl)});ws.onopen=()=>ws.send('worker-frame');ws.onmessage=e=>{ws.close();resolve(e.data)};ws.onerror=()=>reject(new Error('WebSocket failed'))})`,
+        expression: `new Promise((resolve,reject)=>{const ws=new WebSocket(${JSON.stringify(wsUrl)});ws.binaryType='arraybuffer';let i=0;ws.onopen=()=>ws.send('worker-frame-0');ws.onmessage=e=>{if(++i<51)ws.send('worker-frame-'+i);else if(i===51)ws.send(new Uint8Array([1,2,3,4]));else{ws.close();resolve(new Uint8Array(e.data).join())}};ws.onerror=()=>reject(new Error('WebSocket failed'))})`,
         awaitPromise: true,
         returnByValue: true,
       },
       sessionId,
     );
-    assert.equal(wsResult.result.value, "worker-frame");
-    const socketCapture = await completed(wsUrl);
-    assert.equal(socketCapture.status, 101);
+    assert.equal(wsResult.result.value, "1,2,3,4");
+    const { status, frames, droppedFrames } = await completed(wsUrl);
+    assert.equal(status, 101);
+    assert.equal(droppedFrames, 4);
     assert.deepEqual(
-      socketCapture.frames.map((frame) => frame.direction),
-      ["sent", "received"],
+      frames.map((frame) => frame.direction),
+      Array.from({ length: 100 }, (_, i) => (i % 2 ? "received" : "sent")),
     );
     assert.equal(
-      Buffer.from(socketCapture.frames[1].body.data, "base64").toString(),
-      "worker-frame",
+      Buffer.from(frames[1].body.data, "base64").toString(),
+      "worker-frame-2",
+    );
+    assert.deepEqual(
+      frames
+        .slice(-2)
+        .map(({ opcode, bytes, body }) => [opcode, bytes, body.data]),
+      Array(2).fill([2, 4, "AQIDBA=="]),
     );
     await assert.rejects(
       call("start", "--cdp", socket, "--host", "127.0.0.1"),

@@ -41,6 +41,7 @@ export type Entry = {
   protocol?: string;
   fromServiceWorker?: boolean;
   frames?: { direction: string; opcode: number; bytes: number; body?: Body }[];
+  droppedFrames?: number;
 };
 type Group = {
   entries: (Entry | undefined)[];
@@ -307,7 +308,7 @@ export class Capture extends EventEmitter {
         requestHeaders: socket ? {} : this.headers(event.request.headers),
         sensitive: this.options.sensitive,
         ...(socket
-          ? { frames: [] }
+          ? { frames: [], droppedFrames: 0 }
           : {
               resourceType: event.type,
               startedAt: new Date(event.wallTime * 1000).toISOString(),
@@ -412,15 +413,22 @@ export class Capture extends EventEmitter {
       method === "Network.webSocketFrameReceived"
     ) {
       const { response } = params as Protocol.Network.WebSocketFrameSentEvent;
+      const base64 = response.opcode !== 1;
       entry.frames!.push({
         direction: method.endsWith("Sent") ? "sent" : "received",
         opcode: response.opcode,
-        bytes: Buffer.byteLength(response.payloadData),
+        bytes: Buffer.byteLength(
+          response.payloadData,
+          base64 ? "base64" : "utf8",
+        ),
         ...(this.options.sensitive
-          ? { body: this.body(response.payloadData, response.opcode !== 1) }
+          ? { body: this.body(response.payloadData, base64) }
           : {}),
       });
-      if (entry.frames!.length > 100) entry.frames!.shift();
+      if (entry.frames!.length > 100) {
+        entry.frames!.shift();
+        entry.droppedFrames!++;
+      }
     } else if (method === "Network.webSocketClosed") entry.complete = true;
     else return;
     this.update(entry);

@@ -80,7 +80,7 @@ DATA
   --limit bounds retained requests (500). --body-limit bounds bodies (256 KiB).
   A 64 MiB serialized-data budget also evicts oldest requests. Response bodies
   may be unavailable from Chrome. WebSockets retain the latest 100 frames each.
-  No media decryption is performed.
+  droppedFrames counts older ones. No media decryption is performed.
 
 SHARING
   All local Claude/Codex sessions can use the same daemon. --state selects its
