@@ -82,6 +82,17 @@ Without `CHROME_PATH`, the browser test is skipped and the CLI smoke test still 
 
 The only runtime dependency is `chrome-remote-interface`. TypeScript, type declarations, formatting, and the WebSocket fixture are development-only. Node types follow the supported Node 22 API surface.
 
+## Comparison
+
+| Tool | Network debugging workflow |
+|---|---|
+| **Browser&nbsp;Network&nbsp;CLI** | **Ready-made extension-worker capture, opt-in cookies/auth/bodies, live queries, and replay by ID. One CLI install.** |
+| agent-browser | Browser automation with HAR export. Existing Chrome, cookies, and bodies are supported. Extension-worker coverage is unverified here. |
+| Chrome DevTools | Page-oriented network tools through MCP or an experimental CLI. |
+| REA | Records metadata and body shapes. Strips cookies and authorization, so those captures cannot reproduce authenticated requests. |
+| browser-harness-js | Supplies CDP primitives. You build the retained request store and replay workflow. |
+| Claude / ChatGPT in Chrome | Network inspection inside their assistant integrations. Requires the corresponding extension and assistant setup. |
+
 ## Comparison sources
 
 Reviewed October 19, 2026. These are documented capabilities unless marked as tested.

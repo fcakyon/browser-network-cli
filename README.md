@@ -19,14 +19,10 @@ Record and inspect network requests from websites and Chrome extensions, then re
 
 Capture website and extension traffic once. Inspect it from any Claude, Codex, or terminal session. Replay a request by ID with its captured headers and body.
 
-| Tool | Network debugging workflow |
-|---|---|
-| **Browser&nbsp;Network&nbsp;CLI** | **Ready-made extension-worker capture, opt-in cookies/auth/bodies, live queries, and replay by ID. One CLI install.** |
-| agent-browser | Browser automation with HAR export. Existing Chrome, cookies, and bodies are supported. Extension-worker coverage is unverified here. |
-| Chrome DevTools | Page-oriented network tools through MCP or an experimental CLI. |
-| REA | Records metadata and body shapes. Strips cookies and authorization, so those captures cannot reproduce authenticated requests. |
-| browser-harness-js | Supplies CDP primitives. You build the retained request store and replay workflow. |
-| Claude / ChatGPT in Chrome | Network inspection inside their assistant integrations. Requires the corresponding extension and assistant setup. |
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/comparison-dark.svg" />
+  <img src="assets/comparison-light.svg" alt="Browser Network CLI: extension-worker capture, opt-in credentials, live queries and replay by ID. Read the text comparison in the usage guide." width="1100" />
+</picture>
 
 **No MCP configuration. No companion extension. No model subscription.** Chrome debugging access is required. [Comparison sources and coverage](docs/usage.md#comparison-sources).
 
