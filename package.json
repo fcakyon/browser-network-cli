@@ -1,0 +1,43 @@
+{
+  "name": "@fcakyon/browser-network-cli",
+  "version": "0.1.0",
+  "description": "Record and inspect network requests from websites and Chrome extensions, then replay them from your terminal.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "browser-network": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "docs/usage.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fcakyon/browser-network-cli.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "prepack": "npm run build",
+    "format": "prettier --write src test package.json tsconfig.json"
+  },
+  "dependencies": {
+    "chrome-remote-interface": "0.34.0"
+  },
+  "devDependencies": {
+    "@types/chrome-remote-interface": "0.34.0",
+    "@types/node": "^22.0.0",
+    "devtools-protocol": "0.0.1721602",
+    "prettier": "^3.6.2",
+    "typescript": "7.0.2",
+    "ws": "8.22.0"
+  }
+}

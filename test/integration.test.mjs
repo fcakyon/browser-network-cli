@@ -1,0 +1,360 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createServer } from "node:http";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  writeFile,
+  rm,
+  stat,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawn, execFile } from "node:child_process";
+import { once } from "node:events";
+import { promisify } from "node:util";
+import CDP from "chrome-remote-interface";
+import { WebSocketServer } from "ws";
+
+const exec = promisify(execFile);
+const executable = process.env.CHROME_PATH;
+const cli = process.env.BROWSER_NETWORK_CLI || resolve("dist/cli.js");
+
+async function until(check) {
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    const value = await check();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("Timed out waiting for observable capture state");
+}
+
+test(
+  "real extension capture, replay, redaction, scoping and shared daemon lifecycle",
+  {
+    timeout: 90000,
+    skip:
+      !executable &&
+      "Set CHROME_PATH to Chrome for Testing for the extension integration test",
+  },
+  async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "browser-network-test-"));
+    const extension = join(root, "extension");
+    const state = join(root, "state.json");
+    await mkdir(extension);
+    const received = [];
+    const server = createServer(async (req, res) => {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      received.push({
+        url: req.url,
+        authorization: req.headers.authorization,
+        cookie: req.headers.cookie,
+        body: Buffer.concat(chunks).toString(),
+      });
+      if (req.url === "/redirect") {
+        res.writeHead(302, { Location: "/echo" }).end();
+        return;
+      }
+      res.writeHead(200, {
+        "Content-Type": "application/json",
+        "Set-Cookie": "response_cookie=fixture; HttpOnly; Path=/",
+      });
+      res.end(
+        JSON.stringify({
+          ok: true,
+          received: received.at(-1),
+          ...(req.url === "/large" ? { padding: "a".repeat(2048) } : {}),
+        }),
+      );
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const websocket = new WebSocketServer({ server });
+    websocket.on("connection", (socket) =>
+      socket.on("message", (data) => socket.send(data.toString())),
+    );
+    const base = `http://127.0.0.1:${server.address().port}`;
+    await writeFile(
+      join(extension, "manifest.json"),
+      JSON.stringify({
+        manifest_version: 3,
+        name: "Network integration fixture",
+        version: "1.0",
+        permissions: ["cookies"],
+        host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
+        background: { service_worker: "worker.js" },
+      }),
+    );
+    await writeFile(
+      join(extension, "worker.js"),
+      `chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json'}, body:'{"fixture":"extension-worker"}'})).text();};`,
+    );
+    const chrome = spawn(
+      executable,
+      [
+        "--headless=new",
+        "--no-first-run",
+        "--no-default-browser-check",
+        `--user-data-dir=${join(root, "profile")}`,
+        "--remote-debugging-port=0",
+        `--disable-extensions-except=${extension}`,
+        `--load-extension=${extension}`,
+        "about:blank",
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    let cdp,
+      daemon = false;
+    t.after(async () => {
+      if (daemon)
+        await exec(process.execPath, [cli, "stop", "--state", state]).catch(
+          () => {},
+        );
+      await cdp?.close();
+      if (chrome.exitCode === null) {
+        chrome.kill("SIGTERM");
+        await once(chrome, "exit");
+      }
+      for (const client of websocket.clients) client.terminate();
+      websocket.close();
+      server.close();
+      server.closeAllConnections();
+      await rm(root, { recursive: true, force: true });
+    });
+    const socket = await new Promise((resolve, reject) => {
+      let logs = "";
+      const timer = setTimeout(
+        () => reject(new Error("Chrome startup failed: " + logs)),
+        15000,
+      );
+      chrome.stderr.on("data", (chunk) => {
+        logs += chunk.toString();
+        const match = logs.match(/DevTools listening on (ws:\/\/\S+)/);
+        if (match) {
+          clearTimeout(timer);
+          resolve(match[1]);
+        }
+      });
+      chrome.once("error", reject);
+    });
+    cdp = await CDP({ target: socket, local: true });
+    const worker = await until(async () =>
+      (await cdp.Target.getTargets()).targetInfos.find(
+        (info) =>
+          info.type === "service_worker" &&
+          info.url.startsWith("chrome-extension://"),
+      ),
+    );
+    const extensionId = new URL(worker.url).hostname;
+    const { sessionId } = await cdp.Target.attachToTarget({
+      targetId: worker.targetId,
+      flatten: true,
+    });
+    const call = async (...args) =>
+      JSON.parse(
+        (
+          await exec(process.execPath, [cli, ...args, "--state", state], {
+            maxBuffer: 4 * 1024 * 1024,
+          })
+        ).stdout,
+      );
+    const probe = async (url) => {
+      const result = await cdp.send(
+        "Runtime.evaluate",
+        {
+          expression: `self.probe(${JSON.stringify(url)})`,
+          awaitPromise: true,
+          returnByValue: true,
+        },
+        sessionId,
+      );
+      assert.equal(
+        result.exceptionDetails,
+        undefined,
+        JSON.stringify(result.exceptionDetails),
+      );
+    };
+    const completed = async (url) =>
+      until(async () => {
+        const rows = await call("requests");
+        const row = rows.findLast((row) => row.url === url && row.complete);
+        return row && (await call("show", row.id));
+      });
+
+    const started = await call(
+      "start",
+      "--cdp",
+      socket,
+      "--host",
+      "127.0.0.1",
+      "--extension",
+      extensionId,
+      "--sensitive",
+    );
+    daemon = true;
+    assert.ok(
+      started.targets.some((target) => target.type === "service_worker"),
+    );
+    assert.equal((await stat(state)).mode & 0o777, 0o600);
+    const connection = JSON.parse(await readFile(state, "utf8"));
+    assert.equal((await fetch(`${connection.url}/requests`)).status, 403);
+    assert.equal(
+      (
+        await fetch(`${connection.url}/requests`, {
+          headers: {
+            Authorization: `Bearer ${connection.token}`,
+            Origin: "https://unrelated.test",
+          },
+        })
+      ).status,
+      403,
+    );
+    const streamAbort = new AbortController();
+    const stream = await fetch(`${connection.url}/events`, {
+      headers: { Authorization: `Bearer ${connection.token}` },
+      signal: streamAbort.signal,
+    });
+    const reader = stream.body.getReader();
+    await reader.read();
+    await probe(`${base}/echo?token=query-secret`);
+    const event = await reader.read();
+    assert.match(new TextDecoder().decode(event.value), /data: /);
+    streamAbort.abort();
+    const captured = await completed(`${base}/echo?token=query-secret`);
+    assert.equal(captured.target.type, "service_worker");
+    const headers = Object.fromEntries(
+      Object.entries(captured.requestHeaders).map(([key, value]) => [
+        key.toLowerCase(),
+        value,
+      ]),
+    );
+    assert.equal(headers.authorization, "Bearer auth-secret");
+    assert.match(headers.cookie, /fixture_cookie=cookie-secret/);
+    assert.equal(
+      Buffer.from(captured.requestBody.data, "base64").toString(),
+      '{"fixture":"extension-worker"}',
+    );
+    assert.equal(
+      JSON.parse(Buffer.from(captured.responseBody.data, "base64").toString())
+        .ok,
+      true,
+    );
+    assert.ok(
+      Object.entries(captured.responseHeaders).some(
+        ([key, value]) =>
+          key.toLowerCase() === "set-cookie" &&
+          value.includes("response_cookie"),
+      ),
+    );
+    await assert.rejects(call("replay", captured.id), /--execute/);
+    const count = received.length;
+    const replay = await call("replay", captured.id, "--execute");
+    assert.equal(replay.status, 200);
+    assert.equal(received.length, count + 1);
+    assert.equal(received.at(-1).authorization, headers.authorization);
+    assert.equal(received.at(-1).cookie, headers.cookie);
+    assert.equal(received.at(-1).body, '{"fixture":"extension-worker"}');
+
+    const wsUrl = base.replace("http:", "ws:") + "/socket";
+    const wsResult = await cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: `new Promise((resolve,reject)=>{const ws=new WebSocket(${JSON.stringify(wsUrl)});ws.onopen=()=>ws.send('worker-frame');ws.onmessage=e=>{ws.close();resolve(e.data)};ws.onerror=()=>reject(new Error('WebSocket failed'))})`,
+        awaitPromise: true,
+        returnByValue: true,
+      },
+      sessionId,
+    );
+    assert.equal(wsResult.result.value, "worker-frame");
+    const socketCapture = await completed(wsUrl);
+    assert.equal(socketCapture.status, 101);
+    assert.deepEqual(
+      socketCapture.frames.map((frame) => frame.direction),
+      ["sent", "received"],
+    );
+    assert.equal(
+      Buffer.from(socketCapture.frames[1].body.data, "base64").toString(),
+      "worker-frame",
+    );
+    await assert.rejects(
+      call("start", "--cdp", socket, "--host", "127.0.0.1"),
+      /EEXIST/,
+    );
+    assert.equal((await call("status")).pid, started.pid);
+    const anotherClient = await call("requests");
+    assert.ok(anotherClient.some((row) => row.id === captured.id));
+    await probe(`${base.replace("127.0.0.1", "localhost")}/outside`);
+    assert.ok(
+      !(await call("requests")).some((row) => row.url.includes("/outside")),
+    );
+    await probe(`${base}/redirect`);
+    const redirect = await completed(`${base}/echo`);
+    await assert.rejects(
+      call("replay", redirect.id, "--execute"),
+      /without redirects/,
+    );
+    await call("stop");
+    daemon = false;
+    await until(async () => {
+      try {
+        await stat(`${state}.lock`);
+        return false;
+      } catch (error) {
+        return error.code === "ENOENT";
+      }
+    });
+    assert.equal(
+      (await cdp.Browser.getVersion()).product.startsWith("Chrome"),
+      true,
+    );
+
+    await call(
+      "start",
+      "--cdp",
+      socket,
+      "--host",
+      "127.0.0.1",
+      "--extension",
+      extensionId,
+      "--limit",
+      "2",
+    );
+    daemon = true;
+    await probe(`${base}/echo?token=query-secret`);
+    const redacted = await until(async () => {
+      const rows = await call("requests");
+      return rows[0]?.complete && (await call("show", rows[0].id));
+    });
+    const text = JSON.stringify(redacted);
+    for (const secret of [
+      "cookie-secret",
+      "auth-secret",
+      "query-secret",
+      "response_cookie",
+    ])
+      assert.ok(!text.includes(secret), secret);
+    assert.equal(redacted.requestBody, undefined);
+    assert.equal(redacted.responseBody, undefined);
+    await assert.rejects(
+      call("replay", redacted.id, "--execute"),
+      /sensitive capture/,
+    );
+    await probe(`${base}/second`);
+    await probe(`${base}/third`);
+    await until(async () => (await call("requests")).length === 2);
+    assert.ok(!(await call("requests")).some((row) => row.id === redacted.id));
+  },
+);
+
+test("CLI help and unknown command are usable without a browser", async () => {
+  assert.match(
+    (await exec(process.execPath, [cli, "--help"])).stdout,
+    /extension background workers/,
+  );
+  await assert.rejects(
+    exec(process.execPath, [cli, "unknown-command"]),
+    /Unknown command/,
+  );
+});
