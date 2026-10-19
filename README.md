@@ -19,13 +19,15 @@ A network recorder for any shell-enabled agent. No MCP setup, companion extensio
 
 | Tool | Interface | Existing Chrome | Network detail | Extension background traffic |
 |---|---|---|---|---|
-| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg"><img src="assets/logo-light.svg" width="24" height="24" alt=""></picture> **Browser Network CLI** | **CLI + local API** | **Yes** | **Cookies, auth, bodies, WebSocket frames + replay** (opt-in) | **Tested with a real MV3 worker** |
-| agent-browser | CLI | Yes, via CDP | HAR with cookies and bodies | Not verified here |
+| **Browser&nbsp;Network&nbsp;CLI** | **CLI** | **Yes**<sup>*</sup> | **Cookies, auth, bodies, WebSocket frames + replay** (opt-in) | **Tested with a real MV3 worker** |
+| agent-browser | CLI | Yes<sup>*</sup> | HAR with cookies and bodies | Not verified here |
 | Chrome DevTools | MCP + experimental CLI | Yes | Page requests, cookies and bodies | Network tools target pages |
 | REA | CLI + MCP | Yes | Metadata and body shapes, credentials removed | Page-scoped worker metadata |
 | browser-harness-js | CLI + Bun | Yes | Raw CDP primitives | Requires a custom collector |
 | Claude in Chrome | Extension + Claude | Yes | Network inspection | Not verified here |
 | ChatGPT in Chrome | Extension + desktop app | Yes | Network inspection in developer mode | Not verified here |
+
+<sup>*</sup> Requires Chrome debugging access.
 
 “Not verified” does not mean unsupported. Other tools also automate browser interactions. [Sources and coverage](docs/usage.md#comparison-sources).
 
