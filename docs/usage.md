@@ -1,6 +1,6 @@
 # Usage
 
-GitHub installation builds the CLI automatically using temporary development dependencies. For a precompiled package, install a `.tgz` from [Releases](https://github.com/fcakyon/browser-network-cli/releases). npmjs publication is pending.
+The [release archive](https://github.com/fcakyon/browser-network-cli/releases/latest/download/fcakyon-browser-network-cli.tgz) contains compiled JavaScript. Installation requires no Git authentication, TypeScript build, or browser download. npmjs publication is pending.
 
 ## Connect to Chrome
 

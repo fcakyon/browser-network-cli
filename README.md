@@ -15,10 +15,10 @@ Record and inspect network requests from websites and Chrome extensions, then re
 
 ## Install
 
-Requires **Node.js 22.12+**, Chrome, and GitHub access to this private repository:
+Requires **Node.js 22.12+** and Chrome. Install the precompiled release in one command:
 
 ```sh
-npm install -g github:fcakyon/browser-network-cli
+npm install -g https://github.com/fcakyon/browser-network-cli/releases/latest/download/fcakyon-browser-network-cli.tgz
 ```
 
 ## Use

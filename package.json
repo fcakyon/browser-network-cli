@@ -27,7 +27,7 @@
     "build": "tsc",
     "test": "npm run build && node --test test/*.test.mjs",
     "format": "prettier --write src test package.json tsconfig.json",
-    "prepare": "npm run build"
+    "prepack": "npm run build"
   },
   "dependencies": {
     "chrome-remote-interface": "0.34.0"
