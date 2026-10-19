@@ -13,23 +13,22 @@ Record and inspect network requests from websites and Chrome extensions, then re
   <img src="assets/flow-light.svg" alt="Website tabs and extension workers → Chrome DevTools → browser-network → Claude, Codex, or shell" width="980" />
 </picture>
 
-## Compare
+## Why browser-network?
 
-A network recorder for any shell-enabled agent. No MCP setup, companion extension, or model subscription required.
+**Give your coding agent the request, the credentials, and a way to replay it.**
 
-| Tool | Interface | Existing Chrome | Network detail | Extension background traffic |
-|---|---|---|---|---|
-| **Browser&nbsp;Network&nbsp;CLI** | **CLI** | **Yes**<sup>*</sup> | **Cookies, auth, bodies, WebSocket frames + replay** (opt-in) | **Tested with a real MV3 worker** |
-| agent-browser | CLI | Yes<sup>*</sup> | HAR with cookies and bodies | Not verified here |
-| Chrome DevTools | MCP + experimental CLI | Yes | Page requests, cookies and bodies | Network tools target pages |
-| REA | CLI + MCP | Yes | Metadata and body shapes, credentials removed | Page-scoped worker metadata |
-| browser-harness-js | CLI + Bun | Yes | Raw CDP primitives | Requires a custom collector |
-| Claude in Chrome | Extension + Claude | Yes | Network inspection | Not verified here |
-| ChatGPT in Chrome | Extension + desktop app | Yes | Network inspection in developer mode | Not verified here |
+Capture website and extension traffic once. Inspect it from any Claude, Codex, or terminal session. Replay a request by ID with its captured headers and body.
 
-<sup>*</sup> Requires Chrome debugging access.
+| Tool | Network debugging workflow |
+|---|---|
+| **Browser&nbsp;Network&nbsp;CLI** | **Ready-made extension-worker capture, opt-in cookies/auth/bodies, live queries, and replay by ID. One CLI install.** |
+| agent-browser | Browser automation with HAR export. Existing Chrome, cookies, and bodies are supported. Extension-worker coverage is unverified here. |
+| Chrome DevTools | Page-oriented network tools through MCP or an experimental CLI. |
+| REA | Records metadata and body shapes. Strips cookies and authorization, so those captures cannot reproduce authenticated requests. |
+| browser-harness-js | Supplies CDP primitives. You build the retained request store and replay workflow. |
+| Claude / ChatGPT in Chrome | Network inspection inside their assistant integrations. Requires the corresponding extension and assistant setup. |
 
-“Not verified” does not mean unsupported. Other tools also automate browser interactions. [Sources and coverage](docs/usage.md#comparison-sources).
+**No MCP configuration. No companion extension. No model subscription.** Chrome debugging access is required. [Comparison sources and coverage](docs/usage.md#comparison-sources).
 
 ## Install
 
