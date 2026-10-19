@@ -19,7 +19,7 @@ A network recorder for any shell-enabled agent. No MCP setup, companion extensio
 
 | Tool | Interface | Existing Chrome | Network detail | Extension background traffic |
 |---|---|---|---|---|
-| **Browser Network CLI** | CLI + local API | Yes | Opt-in cookies, auth, bodies, WebSocket frames, replay by ID | Tested with a real MV3 worker |
+| <picture><source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg"><img src="assets/logo-light.svg" width="24" height="24" alt=""></picture> **Browser Network CLI** | **CLI + local API** | **Yes** | **Cookies, auth, bodies, WebSocket frames + replay** (opt-in) | **Tested with a real MV3 worker** |
 | agent-browser | CLI | Yes, via CDP | HAR with cookies and bodies | Not verified here |
 | Chrome DevTools | MCP + experimental CLI | Yes | Page requests, cookies and bodies | Network tools target pages |
 | REA | CLI + MCP | Yes | Metadata and body shapes, credentials removed | Page-scoped worker metadata |

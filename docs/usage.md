@@ -50,7 +50,7 @@ Default limits: **500 requests**, **256 KiB per body**, and **64 MiB of serializ
 
 ## Share with agents
 
-Start capture once and query it from any terminal, Claude session, or Codex session on the same machine. Data stays in memory and is cleared on `stop`. Chrome remains open.
+Start capture once and query it from any terminal, Claude session, or Codex session on the same machine. The daemon owns one persistent Chrome connection. Commands such as status, requests, show, and tail query its local API without opening another Chrome connection. Chrome may request approval again after the daemon or browser restarts. Data stays in memory and is cleared on `stop`. Chrome remains open.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
 
