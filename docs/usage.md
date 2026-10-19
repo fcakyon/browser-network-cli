@@ -86,13 +86,12 @@ The only runtime dependency is `chrome-remote-interface`. TypeScript, type decla
 
 | Feature | Browser Network CLI | agent-browser | Chrome DevTools | REA | browser-harness-js | Claude / ChatGPT in Chrome |
 |---|---|---|---|---|---|---|
-| Standalone CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
-| Cookies / auth retained | ✓ | ✓ | ✓ | ✗ | ✓ | ? |
-| Extension-worker recorder | ✓ | ? | ? | ? | ✗ | ? |
-| Replay by request ID | ✓ | ? | ? | ? | ✗ | ? |
-| No assistant subscription | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| Standalone CLI | ✓ | ✓ | Preview | ✓ | ✓ | Extension |
+| Cookies / auth | ✓ | ✓ | ✓ | Removed | DIY | — |
+| Extension workers | ✓ | — | — | Page-scoped | DIY | — |
+| Replay by request ID | ✓ | — | — | — | DIY | — |
 
-✓ Supported, ✗ not provided, ? unverified here. Unknown does not mean unsupported. Chrome DevTools CLI is experimental. Harness exposes credentials through raw CDP, but its request store and replay workflow require custom code. The extension-worker row means a ready-made recorder, not access to CDP primitives. The assistant column refers to their Chrome integrations, not their separate coding CLIs.
+✓ Supported, DIY requires custom code, — unverified here. Unknown does not mean unsupported. Chrome DevTools CLI is experimental. Harness exposes credentials and workers through raw CDP, but its request store and replay workflow require custom code. REA's worker observation is page-scoped. The assistant column refers to their Chrome integrations, not their separate coding CLIs.
 
 All listed tools can connect to existing Chrome. Our tool requires Chrome debugging access too. Our extension test covers capture after attachment.
 

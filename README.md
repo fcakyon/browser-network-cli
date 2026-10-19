@@ -20,7 +20,7 @@ Record and inspect network requests from websites and Chrome extensions, then re
   <img src="assets/comparison-light.svg" alt="Feature comparison: Browser Network CLI supports CLI access, cookies/auth, extension workers and replay by ID." width="1120" />
 </picture>
 
-✓ Supported · ✗ Not provided · ? Unverified. [Details and sources](docs/usage.md#comparison).
+✓ Supported · DIY: custom code · — Unverified. [Details and sources](docs/usage.md#comparison).
 
 ## Install
 
