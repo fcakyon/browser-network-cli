@@ -1,5 +1,7 @@
 # Usage
 
+GitHub installation builds the CLI automatically using temporary development dependencies. For a precompiled package, install a `.tgz` from [Releases](https://github.com/fcakyon/browser-network-cli/releases). npmjs publication is pending.
+
 ## Connect to Chrome
 
 Enable remote debugging at `chrome://inspect/#remote-debugging` and approve Chrome's connection prompt if shown.

@@ -1,6 +1,6 @@
 {
   "name": "@fcakyon/browser-network-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Record and inspect network requests from websites and Chrome extensions, then replay them from your terminal.",
   "type": "module",
   "license": "MIT",
@@ -26,8 +26,8 @@
   "scripts": {
     "build": "tsc",
     "test": "npm run build && node --test test/*.test.mjs",
-    "prepack": "npm run build",
-    "format": "prettier --write src test package.json tsconfig.json"
+    "format": "prettier --write src test package.json tsconfig.json",
+    "prepare": "npm run build"
   },
   "dependencies": {
     "chrome-remote-interface": "0.34.0"

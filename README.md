@@ -15,11 +15,10 @@ Record and inspect network requests from websites and Chrome extensions, then re
 
 ## Install
 
-Requires **Node.js 22.12+** and Chrome. npmjs publication is pending. Install the compiled package from [Releases](https://github.com/fcakyon/browser-network-cli/releases):
+Requires **Node.js 22.12+**, Chrome, and GitHub access to this private repository:
 
 ```sh
-gh release download v0.1.0 --repo fcakyon/browser-network-cli --pattern '*.tgz'
-npm install -g ./fcakyon-browser-network-cli-0.1.0.tgz
+npm install -g github:fcakyon/browser-network-cli
 ```
 
 ## Use
