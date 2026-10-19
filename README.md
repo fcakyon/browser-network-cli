@@ -13,6 +13,22 @@ Record and inspect network requests from websites and Chrome extensions, then re
   <img src="assets/flow-light.svg" alt="Website tabs and extension workers → Chrome DevTools → browser-network → Claude, Codex, or shell" width="980" />
 </picture>
 
+## Compare
+
+A network recorder for any shell-enabled agent. No MCP setup, companion extension, or model subscription required.
+
+| Tool | Interface | Existing Chrome | Network detail | Extension background traffic |
+|---|---|---|---|---|
+| **Browser Network CLI** | CLI + local API | Yes | Opt-in cookies, auth, bodies, WebSocket frames, replay by ID | Tested with a real MV3 worker |
+| agent-browser | CLI | Yes, via CDP | HAR with cookies and bodies | Not verified here |
+| Chrome DevTools | MCP + experimental CLI | Yes | Page requests, cookies and bodies | Network tools target pages |
+| REA | CLI + MCP | Yes | Metadata and body shapes, credentials removed | Page-scoped worker metadata |
+| browser-harness-js | CLI + Bun | Yes | Raw CDP primitives | Requires a custom collector |
+| Claude in Chrome | Extension + Claude | Yes | Network inspection | Not verified here |
+| ChatGPT in Chrome | Extension + desktop app | Yes | Network inspection in developer mode | Not verified here |
+
+“Not verified” does not mean unsupported. Other tools also automate browser interactions. [Sources and coverage](docs/usage.md#comparison-sources).
+
 ## Install
 
 Requires **Node.js 22.12+** and Chrome. Install the precompiled release in one command:

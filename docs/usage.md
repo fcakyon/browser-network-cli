@@ -81,3 +81,16 @@ The integration test uses an isolated Manifest V3 extension and a local server w
 Without `CHROME_PATH`, the browser test is skipped and the CLI smoke test still runs. To test an installed package with the same suite, set `BROWSER_NETWORK_CLI` to its `dist/cli.js` path.
 
 The only runtime dependency is `chrome-remote-interface`. TypeScript, type declarations, formatting, and the WebSocket fixture are development-only. Node types follow the supported Node 22 API surface.
+
+## Comparison sources
+
+Reviewed October 19, 2026. These are documented capabilities unless marked as tested.
+
+- [agent-browser network](https://github.com/vercel-labs/agent-browser/blob/main/docs/content/docs/network.mdx) and [CDP connection](https://github.com/vercel-labs/agent-browser/blob/main/docs/content/docs/cdp-mode.mdx): existing Chrome attachment and HAR capture with cookies and bodies.
+- [Chrome DevTools network tools](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/tool-reference.md#network) and [CLI](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/cli.md): page request inspection includes cookies and bodies. The CLI is experimental.
+- [REA observation](https://github.com/morluto/rea/blob/main/docs/browser-observation.md): strips credentials and retains body shapes. Worker observation is scoped to the page.
+- [browser-harness-js network primitives](https://github.com/browser-use/browser-harness-js/blob/main/interaction-skills/network-requests.md): raw CDP supports capture. Our probe captured extension credentials and bodies through those primitives, but a retained request store and replay-by-ID need application code.
+- [Claude in Chrome](https://support.claude.com/en/articles/12012173-get-started-with-claude-in-chrome): documents network inspection. Raw credential export and extension-worker recording were not verified here.
+- [ChatGPT browser developer mode](https://learn.chatgpt.com/docs/browser#developer-mode): enables full CDP access with site approval. Extension-worker recording was not verified here.
+
+Our integration test checks extension-worker HTTP credentials, bodies, WebSocket frames, and replay after attachment. It does not prove capture of every worker startup request. See [coverage and limits](#coverage-and-limits).
