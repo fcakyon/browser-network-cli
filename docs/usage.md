@@ -84,14 +84,17 @@ The only runtime dependency is `chrome-remote-interface`. TypeScript, type decla
 
 ## Comparison
 
-| Tool | Network debugging workflow |
-|---|---|
-| **Browser&nbsp;Network&nbsp;CLI** | **Ready-made extension-worker capture, opt-in cookies/auth/bodies, live queries, and replay by ID. One CLI install.** |
-| agent-browser | Browser automation with HAR export. Existing Chrome, cookies, and bodies are supported. Extension-worker coverage is unverified here. |
-| Chrome DevTools | Page-oriented network tools through MCP or an experimental CLI. |
-| REA | Records metadata and body shapes. Strips cookies and authorization, so those captures cannot reproduce authenticated requests. |
-| browser-harness-js | Supplies CDP primitives. You build the retained request store and replay workflow. |
-| Claude / ChatGPT in Chrome | Network inspection inside their assistant integrations. Requires the corresponding extension and assistant setup. |
+| Feature | Browser Network CLI | agent-browser | Chrome DevTools | REA | browser-harness-js | Claude / ChatGPT in Chrome |
+|---|---|---|---|---|---|---|
+| Standalone CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+| Cookies / auth retained | ✓ | ✓ | ✓ | ✗ | ✓ | ? |
+| Extension-worker recorder | ✓ | ? | ? | ? | ✗ | ? |
+| Replay by request ID | ✓ | ? | ? | ? | ✗ | ? |
+| No assistant subscription | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
+
+✓ Supported, ✗ not provided, ? unverified here. Unknown does not mean unsupported. Chrome DevTools CLI is experimental. Harness exposes credentials through raw CDP, but its request store and replay workflow require custom code. The extension-worker row means a ready-made recorder, not access to CDP primitives. The assistant column refers to their Chrome integrations, not their separate coding CLIs.
+
+All listed tools can connect to existing Chrome. Our tool requires Chrome debugging access too. Our extension test covers capture after attachment.
 
 ## Comparison sources
 

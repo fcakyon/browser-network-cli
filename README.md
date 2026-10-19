@@ -13,18 +13,14 @@ Record and inspect network requests from websites and Chrome extensions, then re
   <img src="assets/flow-light.svg" alt="Website tabs and extension workers → Chrome DevTools → browser-network → Claude, Codex, or shell" width="980" />
 </picture>
 
-## Why browser-network?
-
-**Give your coding agent the request, the credentials, and a way to replay it.**
-
-Capture website and extension traffic once. Inspect it from any Claude, Codex, or terminal session. Replay a request by ID with its captured headers and body.
+## Compare
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/comparison-dark.svg" />
-  <img src="assets/comparison-light.svg" alt="Browser Network CLI: extension-worker capture, opt-in credentials, live queries and replay by ID. Read the text comparison in the usage guide." width="1100" />
+  <img src="assets/comparison-light.svg" alt="Feature comparison: Browser Network CLI supports CLI access, cookies/auth, extension workers and replay by ID." width="1120" />
 </picture>
 
-**No MCP configuration. No companion extension. No model subscription.** Chrome debugging access is required. [Comparison sources and coverage](docs/usage.md#comparison-sources).
+✓ Supported · ✗ Not provided · ? Unverified. [Details and sources](docs/usage.md#comparison).
 
 ## Install
 
