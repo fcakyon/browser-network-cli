@@ -399,10 +399,10 @@ export class Capture extends EventEmitter {
       entry.error = (params as Protocol.Network.LoadingFailedEvent).errorText;
       entry.complete = true;
     } else if (method === "Network.webSocketWillSendHandshakeRequest") {
-      entry.requestHeaders = this.headers(
-        (params as Protocol.Network.WebSocketWillSendHandshakeRequestEvent)
-          .request.headers,
-      );
+      const { request, wallTime } =
+        params as Protocol.Network.WebSocketWillSendHandshakeRequestEvent;
+      entry.requestHeaders = this.headers(request.headers);
+      entry.startedAt = new Date(wallTime * 1000).toISOString();
     } else if (method === "Network.webSocketHandshakeResponseReceived") {
       const { response } =
         params as Protocol.Network.WebSocketHandshakeResponseReceivedEvent;

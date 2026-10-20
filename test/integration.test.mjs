@@ -258,6 +258,7 @@ test(
     assert.equal(received.at(-1).body, '{"fixture":"extension-worker"}');
 
     const wsUrl = base.replace("http:", "ws:") + "/socket";
+    const wsStarted = Date.now();
     const wsResult = await cdp.send(
       "Runtime.evaluate",
       {
@@ -268,7 +269,10 @@ test(
       sessionId,
     );
     assert.equal(wsResult.result.value, "1,2,3,4");
-    const { status, frames, droppedFrames } = await completed(wsUrl);
+    const { status, frames, droppedFrames, startedAt } = await completed(wsUrl);
+    assert.ok(
+      Date.parse(startedAt) >= wsStarted && Date.parse(startedAt) <= Date.now(),
+    );
     assert.equal(status, 101);
     assert.equal(droppedFrames, 4);
     assert.deepEqual(
