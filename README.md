@@ -49,6 +49,6 @@ Add `--extension ID` to capture an extension's background requests. Add `--sensi
 
 Capture is scoped to the hosts you select. Data stays in memory until stopped.
 
-[Usage and limitations](docs/usage.md) · [Releases](https://github.com/fcakyon/browser-network-cli/releases) · [MIT license](LICENSE)
+[Agent skill](.agents/skills/browser-network/SKILL.md) · [Usage and limitations](docs/usage.md) · [Releases](https://github.com/fcakyon/browser-network-cli/releases) · [MIT license](LICENSE)
 
 Built on [chrome-remote-interface](https://github.com/cyrus-and/chrome-remote-interface).
