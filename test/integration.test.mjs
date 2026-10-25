@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import CDP from "chrome-remote-interface";
 import { WebSocketServer } from "ws";
 
@@ -42,6 +43,14 @@ test(
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "browser-network-test-"));
     const extension = join(root, "extension");
+    const key = generateKeyPairSync("rsa", {
+      modulusLength: 1024,
+    }).publicKey.export({ type: "spki", format: "der" });
+    const extensionId = [
+      ...createHash("sha256").update(key).digest("hex").slice(0, 32),
+    ]
+      .map((char) => String.fromCharCode(97 + parseInt(char, 16)))
+      .join("");
     const state = join(root, "state.json");
     await mkdir(extension);
     const received = [];
@@ -89,6 +98,7 @@ test(
       JSON.stringify({
         manifest_version: 3,
         name: "Network integration fixture",
+        key: key.toString("base64"),
         version: "1.0",
         permissions: ["cookies"],
         host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
@@ -160,9 +170,6 @@ test(
       });
     });
     cdp = await CDP({ target: socket, local: true });
-    const { id: extensionId } = await cdp.send("Extensions.loadUnpacked", {
-      path: extension,
-    });
     let sessionId;
     const call = async (...args) =>
       JSON.parse(
@@ -200,11 +207,13 @@ test(
         JSON.stringify(result.exceptionDetails),
       );
     };
-    const completed = async (url) =>
+    const completed = async (url, wire = false) =>
       until(async () => {
         const rows = await call("requests");
         const row = rows.findLast((row) => row.url === url && row.complete);
-        return row && (await call("show", row.id));
+        if (!row) return;
+        const entry = await call("show", row.id);
+        return (!wire || entry.wireHeaders) && entry;
       });
 
     const started = await call(
@@ -216,8 +225,13 @@ test(
       "--extension",
       extensionId,
       "--sensitive",
+      "--pause-workers",
     );
     daemon = true;
+    assert.equal(
+      (await cdp.send("Extensions.loadUnpacked", { path: extension })).id,
+      extensionId,
+    );
     const worker = await until(async () =>
       (await call("targets")).find(
         (target) =>
@@ -255,7 +269,7 @@ test(
     const event = await reader.read();
     assert.match(new TextDecoder().decode(event.value), /data: /);
     streamAbort.abort();
-    const captured = await completed(`${base}/echo?token=query-secret`);
+    const captured = await completed(`${base}/echo?token=query-secret`, true);
     assert.equal(captured.target.type, "service_worker");
     const headers = Object.fromEntries(
       Object.entries(captured.requestHeaders).map(([key, value]) => [
@@ -442,7 +456,10 @@ test(
     await mkdir(other);
     await writeFile(
       join(other, "manifest.json"),
-      await readFile(join(extension, "manifest.json")),
+      JSON.stringify({
+        ...JSON.parse(await readFile(join(extension, "manifest.json"), "utf8")),
+        key: undefined,
+      }),
     );
     await writeFile(
       join(other, "worker.js"),
