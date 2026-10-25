@@ -121,7 +121,7 @@ test(
           () => {},
         );
       await cdp?.close();
-      if (chrome.exitCode === null) {
+      if (chrome.exitCode === null && chrome.signalCode === null) {
         chrome.kill("SIGTERM");
         await once(chrome, "exit");
       }
@@ -145,7 +145,18 @@ test(
           resolve(match[1]);
         }
       });
-      chrome.once("error", reject);
+      chrome.once("error", (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      chrome.once("exit", (code, signal) => {
+        clearTimeout(timer);
+        reject(
+          new Error(
+            `Chrome exited before debugging was ready (${code ?? signal}): ${logs}`,
+          ),
+        );
+      });
     });
     cdp = await CDP({ target: socket, local: true });
     const { id: extensionId } = await cdp.send("Extensions.loadUnpacked", {
@@ -158,10 +169,7 @@ test(
           info.url === `chrome-extension://${extensionId}/worker.js`,
       ),
     );
-    const { sessionId } = await cdp.Target.attachToTarget({
-      targetId: worker.targetId,
-      flatten: true,
-    });
+    let sessionId;
     const call = async (...args) =>
       JSON.parse(
         (
@@ -216,6 +224,10 @@ test(
       "--sensitive",
     );
     daemon = true;
+    ({ sessionId } = await cdp.Target.attachToTarget({
+      targetId: worker.targetId,
+      flatten: true,
+    }));
     assert.ok(
       started.targets.some((target) => target.type === "service_worker"),
     );

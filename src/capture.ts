@@ -243,6 +243,7 @@ export class Capture extends EventEmitter {
     this.attaching.add(info.targetId);
     let sessionId: string | undefined;
     try {
+      this.emit("startup", `Attaching ${info.type}`);
       ({ sessionId } = await this.client.Target.attachToTarget({
         targetId: info.targetId,
         flatten: true,
@@ -267,6 +268,7 @@ export class Capture extends EventEmitter {
 
   private async observe(info: Target, sessionId: string): Promise<void> {
     this.sessions.set(sessionId, info);
+    this.emit("startup", `Enabling network for ${info.type}`);
     await this.client.send(
       "Network.enable",
       {
@@ -277,6 +279,7 @@ export class Capture extends EventEmitter {
       sessionId,
     );
     this.targets.set(info.targetId, { info, sessionId });
+    this.emit("startup", `Observing ${info.type}`);
   }
 
   async listTargets() {
