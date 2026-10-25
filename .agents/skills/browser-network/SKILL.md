@@ -32,7 +32,7 @@ browser-network wait --contains /api/ --method POST --status 200 --after LAST_RE
 
 For bodies, cookies, authorization values or WebSocket payloads, choose `--sensitive` when starting capture. Default mode omits them. Repeat `--host` for separate API/CDN hosts. Each host includes its subdomains. Add `--extension ID` for extension background workers. Their destinations must also match the host scope.
 
-For startup failures, use `--pause-workers` only in a dedicated test browser, before loading/restarting the extension. This briefly pauses new service workers until observation is ready. It cannot recover earlier requests. Keep provider sessions, permission failures and playback outcomes separate. Use `media --target PAGE_ID` for read-only frame/time/dimension evidence before considering screenshots, since screen capture can disturb protected playback.
+For startup evidence, use `--pause-workers` before loading the extension in a dedicated test browser. Use `media --target PAGE_ID` to inspect video without screen capture, which can disturb protected playback. Keep login, license and decoded-output checks separate.
 
 5. Save needed evidence with `export --output /private/path/capture.json` before stopping. Exports preserve the selected sensitive/redacted mode, refuse overwrite and include evicted-request counts. Sensitive `show` output belongs in an ignored private directory with `umask 077`, not shared terminal output or tracked files. Inspect field names, byte counts and redacted summaries instead of secrets. Use `browser-network stop` only for a capture you own. It clears in-memory evidence and leaves Chrome running. Close only temporary tabs and servers created for the task.
 

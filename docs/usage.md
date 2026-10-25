@@ -59,17 +59,16 @@ browser-network export --output /private/path/capture.json
 browser-network media --target PAGE_ID --duration 1000
 ```
 
-Wait matches retained completed requests newer than `--after`, including requests completed before the wait command starts. Timeout fails with HTTP 408. A failed network request can match when no status filter is given. Inspect its `error`. Each recorder has its own ID sequence. Exports retain the capture's redaction mode, loss counters and bounded entries, use owner-only permissions, and refuse to overwrite a file. Sensitive captures produce sensitive exports. Old evicted requests cannot be recovered.
+- `wait`: match a completed request newer than `--after`. Timeout returns 408. Check `error` when no status filter is set.
+- `export`: save retained data and loss counts to a new owner-only JSON file. Sensitive mode stays sensitive.
+- `media`: sample video dimensions, frames and time without screenshots or playback changes. Use the video's page or iframe target. Media keys alone do not prove playback.
+- `--pause-workers`: arm capture before loading/restarting a service worker in a dedicated test browser. It briefly pauses new service workers, including out-of-scope ones. Existing requests and dedicated/shared-worker startup are not covered.
 
-The media command reads video dimensions, timestamps, frames, dropped frames, errors and whether media keys are attached, twice. It does not play, seek, capture the screen or decrypt video. Compare the samples to verify advancement. Attached keys alone do not prove licensed playback. Choose an iframe target when the video lives there. Replaced video elements and navigation require a fresh observation.
-
-For immediate service-worker requests, start with `--pause-workers` in a dedicated test browser **before** loading or restarting the extension. Keep `--extension` and destination hosts explicit. New service workers pause until network observation is enabled, then resume. Out-of-scope service workers are resumed and detached immediately. This option briefly affects every new service worker in that browser, so do not use it on a shared personal browser. It cannot recover requests from workers already running, and does not promise startup coverage for dedicated/shared workers. Stopping the recorder removes its auto-attachment.
-
-Network evidence does not prove provider login, title access, a license or decoded HD output. Verify those separately. For protected-media debugging, start with network and media metadata: screen-capture software can itself trigger output-protection failures. Never stop shared capture services or change browser identity as a generic workaround.
+Verify provider login, title access and decoded playback separately. Screen capture can trigger output-protection errors. Do not stop shared capture services to work around them.
 
 ## Share with agents
 
-Start capture once and query it from any terminal, Claude session, or Codex session on the same machine. The daemon owns one persistent Chrome connection. Commands such as status, requests, show, and tail query its local API without opening another Chrome connection. Chrome may request approval again after the daemon or browser restarts. Data stays in memory and is cleared on `stop`. Chrome remains open.
+One daemon shares a Chrome connection across local CLI and agent sessions. `stop` clears captured data and leaves Chrome open.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
 

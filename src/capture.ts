@@ -198,8 +198,10 @@ export class Capture extends EventEmitter {
         message.params,
         message.sessionId,
       ).catch((error) => this.note(error));
-      this.pending.add(task);
-      void task.finally(() => this.pending.delete(task));
+      if (message.method.startsWith("Target.")) {
+        this.pending.add(task);
+        void task.finally(() => this.pending.delete(task));
+      }
     });
     this.emit("startup", "Configuring worker attachment");
     if (this.options.pauseWorkers)
