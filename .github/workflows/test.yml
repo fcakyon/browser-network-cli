@@ -13,6 +13,8 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    env:
+      CHROME_NO_SANDBOX: ${{ runner.os == 'Linux' && '1' || '' }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7

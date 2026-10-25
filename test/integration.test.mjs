@@ -103,6 +103,7 @@ test(
       executable,
       [
         "--headless=new",
+        ...(process.env.CHROME_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
         "--no-first-run",
         "--no-default-browser-check",
         "--use-mock-keychain",
@@ -162,13 +163,6 @@ test(
     const { id: extensionId } = await cdp.send("Extensions.loadUnpacked", {
       path: extension,
     });
-    const worker = await until(async () =>
-      (await cdp.Target.getTargets()).targetInfos.find(
-        (info) =>
-          info.type === "service_worker" &&
-          info.url === `chrome-extension://${extensionId}/worker.js`,
-      ),
-    );
     let sessionId;
     const call = async (...args) =>
       JSON.parse(
@@ -224,13 +218,18 @@ test(
       "--sensitive",
     );
     daemon = true;
+    const worker = await until(async () =>
+      (await call("targets")).find(
+        (target) =>
+          target.url === `chrome-extension://${extensionId}/worker.js` &&
+          target.attached,
+      ),
+    );
     ({ sessionId } = await cdp.Target.attachToTarget({
-      targetId: worker.targetId,
+      targetId: worker.id,
       flatten: true,
     }));
-    assert.ok(
-      started.targets.some((target) => target.type === "service_worker"),
-    );
+    assert.equal(worker.type, "service_worker");
     assert.equal((await stat(state)).mode & 0o777, 0o600);
     const connection = JSON.parse(await readFile(state, "utf8"));
     assert.equal((await fetch(`${connection.url}/requests`)).status, 403);
@@ -420,6 +419,7 @@ test(
       "--pause-workers",
     );
     daemon = true;
+    t.diagnostic("startup capture and worker reloads");
     for (let run = 0; run < 2; run++) {
       const after = (await call("status")).lastRequestId;
       await cdp.send("Extensions.uninstall", { id: extensionId });
@@ -458,6 +458,7 @@ test(
       ),
     );
 
+    t.diagnostic("read-only media and target isolation");
     const { targetId } = await cdp.Target.createTarget({
       url: base + "/video",
       background: true,
