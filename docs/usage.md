@@ -14,7 +14,7 @@ browser-network start --cdp ws://127.0.0.1:9222/devtools/browser/ID \
   --extension EXTENSION_ID --sensitive
 ```
 
-Find extension IDs in `chrome://extensions`. Repeat `--host` and `--extension` as needed. Each host includes its subdomains and limits request destinations, including extension requests. Add API/CDN hosts explicitly.
+Use `browser-network targets` to list targets within the capture scope and their attachment status. Add `--target ID` when starting a recorder to restrict it to a specific target. Find extension IDs in `chrome://extensions`. Repeat `--host` and `--extension` as needed. Each host includes its subdomains and limits request destinations, including extension requests. Add API/CDN hosts explicitly.
 
 Capture uses existing Chrome sessions. It does not install Chrome, copy your profile, or change browser security settings.
 
@@ -41,12 +41,31 @@ Replay makes a **real request** with captured credentials. It does not follow re
 ## Coverage and limits
 
 - Capture covers selected Chrome targets, including extension service workers. It does not capture all traffic on your computer or inbound server traffic.
-- Capture starts after attachment. A new worker's earliest requests can be missed. Content-script requests may appear under the page target.
+- Normal capture starts after attachment. A new worker's earliest requests can be missed. Content-script requests may appear under the page target.
 - Header events arriving before a permitted request URL is known are discarded. Such requests may lack full wire headers and cannot be replayed.
 - Chrome may discard response bodies, serve cached responses without all events, or omit upload data. Missing bodies are reported explicitly.
 - No media decryption is performed.
 
 Default limits: **500 requests**, **256 KiB per body**, and **64 MiB of serialized capture data**. WebSockets retain their latest 100 frames, and `droppedFrames` counts older ones. Old requests are evicted when limits are reached. Use `--limit` and `--body-limit` to adjust the first two limits.
+
+## Scripted checks
+
+Use completed requests as bounded checkpoints instead of sleeping or repeatedly listing traffic:
+
+```sh
+browser-network status  # lastRequestId is a checkpoint for the next action
+browser-network wait --contains /connect --method POST --status 200 --after 12 --timeout 10000
+browser-network export --output /private/path/capture.json
+browser-network media --target PAGE_ID --duration 1000
+```
+
+Wait matches retained completed requests newer than `--after`, including requests completed before the wait command starts. Timeout fails with HTTP 408. A failed network request can match when no status filter is given; inspect its `error`. Each recorder has its own ID sequence. Exports retain the capture's redaction mode, loss counters and bounded entries, use owner-only permissions, and refuse to overwrite a file. Sensitive captures produce sensitive exports. Old evicted requests cannot be recovered.
+
+The media command reads video dimensions, timestamps, frames, dropped frames, errors and whether media keys are attached, twice. It does not play, seek, capture the screen or decrypt video. Compare the samples to verify advancement; attached keys alone do not prove licensed playback. Choose an iframe target when the video lives there. Replaced video elements and navigation require a fresh observation.
+
+For immediate service-worker requests, start with `--pause-workers` in a dedicated test browser **before** loading or restarting the extension. Keep `--extension` and destination hosts explicit. New service workers pause until network observation is enabled, then resume. Out-of-scope service workers are resumed and detached immediately. This option briefly affects every new service worker in that browser, so do not use it on a shared personal browser. It cannot recover requests from workers already running, and does not promise startup coverage for dedicated/shared workers. Stopping the recorder removes its auto-attachment.
+
+Network evidence does not prove provider login, title access, a license or decoded HD output. Verify those separately. For protected-media debugging, start with network and media metadata: screen-capture software can itself trigger output-protection failures. Never stop shared capture services or change browser identity as a generic workaround.
 
 ## Share with agents
 
@@ -62,6 +81,10 @@ The state file has owner-only permissions and contains the localhost API URL and
 | GET | `/requests` | Request summaries |
 | GET | `/requests/ID` | Full retained request |
 | GET | `/events` | Live summaries through SSE |
+| GET | `/targets` | Scoped targets and attachment status |
+| GET | `/wait?contains=TEXT&after=ID&timeout=MS` | Completed match, optional method/status filters |
+| GET | `/export` | Capture snapshot with loss metadata |
+| GET | `/media?target=ID&duration=MS` | Read-only video samples, 1–10,000 ms apart |
 | POST | `/stop` | Stop capture and clear memory |
 
 Send `Authorization: Bearer TOKEN`. Requests with a browser Origin header are denied. There is no public tunnel or remote bind option.

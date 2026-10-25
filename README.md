@@ -42,12 +42,16 @@ browser-network start \
 browser-network tail        # Follow live requests
 browser-network requests    # Find a request ID
 browser-network show 12     # Inspect its details
+browser-network targets     # Find scoped page/worker IDs
+browser-network wait --contains /api/ --status 200 --timeout 10000
+browser-network export --output /private/path/capture.json
+browser-network media --target PAGE_ID
 browser-network stop        # Leave Chrome running
 ```
 
 Add `--extension ID` to capture an extension's background requests. Add `--sensitive` to retain cookies, authorization headers, and bodies. Replay requires `browser-network replay ID --execute` and sends a real request.
 
-Capture is scoped to the hosts you select. Data stays in memory until stopped.
+Capture is scoped to the hosts you select. Export evidence before stopping. For service-worker startup requests, use `--pause-workers` only in a dedicated test browser before loading the extension. Media inspection reads video state without screenshots.
 
 [Agent skill](.agents/skills/browser-network/SKILL.md) · [Usage and limitations](docs/usage.md) · [Releases](https://github.com/fcakyon/browser-network-cli/releases) · [MIT license](LICENSE)
 
