@@ -100,7 +100,7 @@ CHROME_PATH="/path/to/Chrome for Testing" npm test
 
 The integration test uses an isolated Manifest V3 extension and a local server with synthetic credentials. It checks worker capture, Cookie/Authorization and body retention, replay, WebSockets, redaction, host scope, API authentication, eviction, and daemon lifecycle. It never uses your browsing profile.
 
-Linux CI sets `CHROME_NO_SANDBOX=1` only for its disposable localhost fixture. The CLI never launches or changes the browser sandbox.
+macOS CI uses `CHROME_APP` to launch headless Chrome through LaunchServices with its sandbox enabled. Linux CI sets `CHROME_NO_SANDBOX=1` for localhost fixtures only. The CLI never changes browser sandbox settings.
 
 Without `CHROME_PATH`, the browser test is skipped and the CLI smoke test still runs. To test an installed package with the same suite, set `BROWSER_NETWORK_CLI` to its `dist/cli.js` path.
 

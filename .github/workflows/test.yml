@@ -26,6 +26,13 @@ jobs:
         with:
           chrome-version: stable
           install-dependencies: ${{ runner.os == 'Linux' }}
+      - name: Prepare macOS application launch
+        if: runner.os == 'macOS'
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          ditto "${CHROME_PATH%/Contents/MacOS/*}" "$RUNNER_TEMP/Chrome for Testing.app"
+          echo "CHROME_APP=$RUNNER_TEMP/Chrome for Testing.app" >> "$GITHUB_ENV"
       - run: npm ci
       - run: npm test
         env:

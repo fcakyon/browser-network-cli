@@ -109,19 +109,35 @@ test(
       join(extension, "worker.js"),
       `fetch(${JSON.stringify(base + "/startup")}); chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json'}, body:'{"fixture":"extension-worker"}'})).text();};`,
     );
+    const profile = join(root, "profile");
+    const chromeLog = join(root, "chrome.log");
+    const browserArgs = [
+      "--headless=new",
+      ...(process.env.CHROME_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--use-mock-keychain",
+      "--user-data-dir=" + profile,
+      "--remote-debugging-port=0",
+      "--enable-unsafe-extension-debugging",
+      "about:blank",
+    ];
     const chrome = spawn(
-      executable,
-      [
-        "--headless=new",
-        ...(process.env.CHROME_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--use-mock-keychain",
-        `--user-data-dir=${join(root, "profile")}`,
-        "--remote-debugging-port=0",
-        "--enable-unsafe-extension-debugging",
-        "about:blank",
-      ],
+      process.env.CHROME_APP ? "/usr/bin/open" : executable,
+      process.env.CHROME_APP
+        ? [
+            "-n",
+            "-g",
+            "-j",
+            "-W",
+            "--stderr",
+            chromeLog,
+            "-a",
+            process.env.CHROME_APP,
+            "--args",
+            ...browserArgs,
+          ]
+        : browserArgs,
       { stdio: ["ignore", "ignore", "pipe"] },
     );
     let cdp,
@@ -131,8 +147,22 @@ test(
         await exec(process.execPath, [cli, "stop", "--state", state]).catch(
           () => {},
         );
+      if (cdp) await cdp.Browser.close().catch(() => {});
+      if (process.env.CHROME_APP)
+        await exec("/usr/bin/pkill", [
+          "-TERM",
+          "-f",
+          "--",
+          "--user-data-dir=" + profile,
+        ]).catch((error) => {
+          if (error.code !== 1) throw error;
+        });
       await cdp?.close();
-      if (chrome.exitCode === null && chrome.signalCode === null) {
+      if (
+        chrome.pid &&
+        chrome.exitCode === null &&
+        chrome.signalCode === null
+      ) {
         chrome.kill("SIGTERM");
         await once(chrome, "exit");
       }
@@ -142,32 +172,28 @@ test(
       server.closeAllConnections();
       await rm(root, { recursive: true, force: true });
     });
-    let logs = "";
-    const socket = await new Promise((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error("Chrome startup failed: " + logs)),
-        15000,
-      );
-      chrome.stderr.on("data", (chunk) => {
-        logs += chunk.toString();
-        const match = logs.match(/DevTools listening on (ws:\/\/\S+)/);
-        if (match) {
-          clearTimeout(timer);
-          resolve(match[1]);
-        }
+    let logs = "",
+      launchError;
+    chrome.stderr.on("data", (chunk) => {
+      logs += chunk.toString();
+    });
+    chrome.once("error", (error) => {
+      launchError = error;
+    });
+    const socket = await until(async () => {
+      if (launchError) throw launchError;
+      if (chrome.exitCode !== null || chrome.signalCode !== null)
+        throw new Error("Chrome exited before debugging was ready: " + logs);
+      const portFile = await readFile(
+        join(profile, "DevToolsActivePort"),
+        "utf8",
+      ).catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
       });
-      chrome.once("error", (error) => {
-        clearTimeout(timer);
-        reject(error);
-      });
-      chrome.once("exit", (code, signal) => {
-        clearTimeout(timer);
-        reject(
-          new Error(
-            `Chrome exited before debugging was ready (${code ?? signal}): ${logs}`,
-          ),
-        );
-      });
+      if (!portFile) return;
+      const [port, endpoint] = portFile.trim().split("\n");
+      return "ws://127.0.0.1:" + port + endpoint;
     });
     cdp = await CDP({ target: socket, local: true });
     let sessionId;
@@ -248,7 +274,10 @@ test(
       throw new Error(
         JSON.stringify({
           message: error.message,
-          chrome: logs.slice(-6000),
+          chrome: (process.env.CHROME_APP
+            ? await readFile(chromeLog, "utf8")
+            : logs
+          ).slice(-6000),
           capture,
           targets: targets.targetInfos,
           extensions,
