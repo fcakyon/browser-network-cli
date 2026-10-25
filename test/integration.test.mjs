@@ -142,8 +142,8 @@ test(
       server.closeAllConnections();
       await rm(root, { recursive: true, force: true });
     });
+    let logs = "";
     const socket = await new Promise((resolve, reject) => {
-      let logs = "";
       const timer = setTimeout(
         () => reject(new Error("Chrome startup failed: " + logs)),
         15000,
@@ -238,7 +238,25 @@ test(
           target.url === `chrome-extension://${extensionId}/worker.js` &&
           target.attached,
       ),
-    );
+    ).catch(async (error) => {
+      const [capture, targets, extensions, recorder] = await Promise.all([
+        call("status"),
+        cdp.Target.getTargets(),
+        cdp.send("Extensions.getExtensions"),
+        readFile(state + ".log", "utf8"),
+      ]);
+      throw new Error(
+        JSON.stringify({
+          message: error.message,
+          chrome: logs.slice(-6000),
+          capture,
+          targets: targets.targetInfos,
+          extensions,
+          recorder,
+        }),
+        { cause: error },
+      );
+    });
     ({ sessionId } = await cdp.Target.attachToTarget({
       targetId: worker.id,
       flatten: true,
