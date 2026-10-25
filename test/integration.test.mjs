@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { createServer as createProxy, connect } from "node:net";
 import {
   mkdtemp,
   mkdir,
@@ -141,6 +142,8 @@ test(
       { stdio: ["ignore", "ignore", "pipe"] },
     );
     let cdp,
+      proxy,
+      tunnel,
       daemon = false;
     t.after(async () => {
       if (daemon)
@@ -158,6 +161,7 @@ test(
           if (error.code !== 1) throw error;
         });
       await cdp?.close();
+      proxy?.close();
       if (
         chrome.pid &&
         chrome.exitCode === null &&
@@ -196,6 +200,32 @@ test(
       return "ws://127.0.0.1:" + port + endpoint;
     });
     cdp = await CDP({ target: socket, local: true });
+    proxy = createProxy((inbound) => {
+      const upstream = connect(Number(new URL(socket).port), "127.0.0.1");
+      const connection = {
+        inbound,
+        upstream,
+        hold: false,
+        chunks: [],
+        ended: false,
+      };
+      tunnel = connection;
+      inbound.pipe(upstream);
+      upstream.on("data", (chunk) => {
+        if (connection.hold) {
+          connection.chunks.push(chunk);
+          upstream.emit("held-data");
+        } else inbound.write(chunk);
+      });
+      inbound.on("close", () => upstream.destroy());
+      upstream.on("close", () => {
+        connection.ended = true;
+        if (!connection.hold) inbound.end();
+      });
+    });
+    await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const captureSocket = new URL(socket);
+    captureSocket.port = String(proxy.address().port);
     let sessionId;
     const call = async (...args) =>
       JSON.parse(
@@ -206,16 +236,38 @@ test(
         ).stdout,
       );
     const stopRecorder = async () => {
-      await call("stop");
-      daemon = false;
-      await until(async () => {
-        try {
-          await stat(`${state}.lock`);
-          return false;
-        } catch (error) {
-          return error.code === "ENOENT";
-        }
+      const current = tunnel;
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      current.hold = true;
+      const incoming = once(current.upstream, "held-data", {
+        signal: controller.signal,
       });
+      const stopping = call("stop");
+      let premature;
+      try {
+        await Promise.race([incoming, stopping]);
+        premature = await Promise.race([
+          stopping.then(() => true),
+          new Promise((resolve) => setTimeout(() => resolve(false), 200)),
+        ]);
+      } finally {
+        clearTimeout(timeout);
+        controller.abort();
+        current.hold = false;
+        for (const chunk of current.chunks.splice(0))
+          current.inbound.write(chunk);
+        if (current.ended) current.inbound.end();
+      }
+      await stopping;
+      daemon = false;
+      assert.equal(
+        premature,
+        false,
+        "stop acknowledged before Chrome detached",
+      );
+      for (const file of [state, state + ".lock"])
+        await assert.rejects(stat(file), { code: "ENOENT" });
     };
     const probe = async (url) => {
       const result = await cdp.send(
@@ -245,7 +297,7 @@ test(
     const started = await call(
       "start",
       "--cdp",
-      socket,
+      captureSocket.href,
       "--host",
       "127.0.0.1",
       "--extension",
@@ -409,7 +461,7 @@ test(
     await call(
       "start",
       "--cdp",
-      socket,
+      captureSocket.href,
       "--host",
       "127.0.0.1",
       "--extension",
@@ -472,7 +524,7 @@ test(
     await call(
       "start",
       "--cdp",
-      socket,
+      captureSocket.href,
       "--host",
       "127.0.0.1",
       "--extension",
@@ -589,7 +641,7 @@ test(
     await call(
       "start",
       "--cdp",
-      socket,
+      captureSocket.href,
       "--host",
       "127.0.0.1",
       "--target",

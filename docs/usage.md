@@ -68,7 +68,7 @@ Verify provider login, title access and decoded playback separately. Screen capt
 
 ## Share with agents
 
-One daemon shares a Chrome connection across local CLI and agent sessions. `stop` clears captured data and leaves Chrome open.
+One daemon shares a Chrome connection across local CLI and agent sessions. `stop` waits for detachment and state-file cleanup, then leaves Chrome open.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
 

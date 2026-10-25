@@ -300,19 +300,20 @@ async function serve(): Promise<void> {
     )
       response.end(JSON.stringify(capture!.entries.get(path.split("/")[2])));
     else if (request.method === "POST" && path === "/stop") {
-      response.end("{}");
-      void shutdown();
+      void shutdown(response);
     } else response.writeHead(404).end("{}");
   });
-  async function shutdown(): Promise<void> {
+  async function shutdown(response?: ServerResponse): Promise<void> {
     if (stopping) return;
     stopping = true;
     for (const client of clients) client.end();
     server.close();
-    server.closeAllConnections();
     await capture?.close();
     if (stateWritten) await unlink(args.state);
     await unlink(`${args.state}.lock`);
+    if (response)
+      await new Promise<void>((resolve) => response.end("{}", resolve));
+    server.closeAllConnections();
   }
   process.once("SIGTERM", () => {
     void shutdown().then(() => process.exit(0));
