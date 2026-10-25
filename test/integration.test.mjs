@@ -14,6 +14,7 @@ import { join, resolve } from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { once } from "node:events";
 import { promisify } from "node:util";
+import { createHash, generateKeyPairSync } from "node:crypto";
 import CDP from "chrome-remote-interface";
 import { WebSocketServer } from "ws";
 
@@ -42,6 +43,14 @@ test(
   async (t) => {
     const root = await mkdtemp(join(tmpdir(), "browser-network-test-"));
     const extension = join(root, "extension");
+    const key = generateKeyPairSync("rsa", {
+      modulusLength: 1024,
+    }).publicKey.export({ type: "spki", format: "der" });
+    const extensionId = [
+      ...createHash("sha256").update(key).digest("hex").slice(0, 32),
+    ]
+      .map((char) => String.fromCharCode(97 + parseInt(char, 16)))
+      .join("");
     const state = join(root, "state.json");
     await mkdir(extension);
     const received = [];
@@ -54,6 +63,14 @@ test(
         cookie: req.headers.cookie,
         body: Buffer.concat(chunks).toString(),
       });
+      if (req.url === "/video") {
+        res
+          .writeHead(200, { "Content-Type": "text/html" })
+          .end(
+            '<video autoplay muted></video><script>const c=document.createElement("canvas");c.width=64;c.height=48;const ctx=c.getContext("2d");setInterval(()=>{ctx.fillStyle="rgb("+(Date.now()%255)+",0,0)";ctx.fillRect(0,0,64,48)},33);document.querySelector("video").srcObject=c.captureStream(30);</script>',
+          );
+        return;
+      }
       if (req.url === "/redirect") {
         res.writeHead(302, { Location: "/echo" }).end();
         return;
@@ -81,6 +98,7 @@ test(
       JSON.stringify({
         manifest_version: 3,
         name: "Network integration fixture",
+        key: key.toString("base64"),
         version: "1.0",
         permissions: ["cookies"],
         host_permissions: ["http://127.0.0.1/*", "http://localhost/*"],
@@ -89,20 +107,37 @@ test(
     );
     await writeFile(
       join(extension, "worker.js"),
-      `chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json'}, body:'{"fixture":"extension-worker"}'})).text();};`,
+      `fetch(${JSON.stringify(base + "/startup")}); chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json'}, body:'{"fixture":"extension-worker"}'})).text();};`,
     );
+    const profile = join(root, "profile");
+    const chromeLog = join(root, "chrome.log");
+    const browserArgs = [
+      "--headless=new",
+      ...(process.env.CHROME_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--use-mock-keychain",
+      "--user-data-dir=" + profile,
+      "--remote-debugging-port=0",
+      "--enable-unsafe-extension-debugging",
+      "about:blank",
+    ];
     const chrome = spawn(
-      executable,
-      [
-        "--headless=new",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--use-mock-keychain",
-        `--user-data-dir=${join(root, "profile")}`,
-        "--remote-debugging-port=0",
-        "--enable-unsafe-extension-debugging",
-        "about:blank",
-      ],
+      process.env.CHROME_APP ? "/usr/bin/open" : executable,
+      process.env.CHROME_APP
+        ? [
+            "-n",
+            "-g",
+            "-j",
+            "-W",
+            "--stderr",
+            chromeLog,
+            "-a",
+            process.env.CHROME_APP,
+            "--args",
+            ...browserArgs,
+          ]
+        : browserArgs,
       { stdio: ["ignore", "ignore", "pipe"] },
     );
     let cdp,
@@ -112,8 +147,22 @@ test(
         await exec(process.execPath, [cli, "stop", "--state", state]).catch(
           () => {},
         );
+      if (cdp) await cdp.Browser.close().catch(() => {});
+      if (process.env.CHROME_APP)
+        await exec("/usr/bin/pkill", [
+          "-TERM",
+          "-f",
+          "--",
+          "--user-data-dir=" + profile,
+        ]).catch((error) => {
+          if (error.code !== 1) throw error;
+        });
       await cdp?.close();
-      if (chrome.exitCode === null) {
+      if (
+        chrome.pid &&
+        chrome.exitCode === null &&
+        chrome.signalCode === null
+      ) {
         chrome.kill("SIGTERM");
         await once(chrome, "exit");
       }
@@ -123,37 +172,31 @@ test(
       server.closeAllConnections();
       await rm(root, { recursive: true, force: true });
     });
-    const socket = await new Promise((resolve, reject) => {
-      let logs = "";
-      const timer = setTimeout(
-        () => reject(new Error("Chrome startup failed: " + logs)),
-        15000,
-      );
-      chrome.stderr.on("data", (chunk) => {
-        logs += chunk.toString();
-        const match = logs.match(/DevTools listening on (ws:\/\/\S+)/);
-        if (match) {
-          clearTimeout(timer);
-          resolve(match[1]);
-        }
+    let logs = "",
+      launchError;
+    chrome.stderr.on("data", (chunk) => {
+      logs += chunk.toString();
+    });
+    chrome.once("error", (error) => {
+      launchError = error;
+    });
+    const socket = await until(async () => {
+      if (launchError) throw launchError;
+      if (chrome.exitCode !== null || chrome.signalCode !== null)
+        throw new Error("Chrome exited before debugging was ready: " + logs);
+      const portFile = await readFile(
+        join(profile, "DevToolsActivePort"),
+        "utf8",
+      ).catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
       });
-      chrome.once("error", reject);
+      if (!portFile) return;
+      const [port, endpoint] = portFile.trim().split("\n");
+      return "ws://127.0.0.1:" + port + endpoint;
     });
     cdp = await CDP({ target: socket, local: true });
-    const { id: extensionId } = await cdp.send("Extensions.loadUnpacked", {
-      path: extension,
-    });
-    const worker = await until(async () =>
-      (await cdp.Target.getTargets()).targetInfos.find(
-        (info) =>
-          info.type === "service_worker" &&
-          info.url === `chrome-extension://${extensionId}/worker.js`,
-      ),
-    );
-    const { sessionId } = await cdp.Target.attachToTarget({
-      targetId: worker.targetId,
-      flatten: true,
-    });
+    let sessionId;
     const call = async (...args) =>
       JSON.parse(
         (
@@ -162,6 +205,18 @@ test(
           })
         ).stdout,
       );
+    const stopRecorder = async () => {
+      await call("stop");
+      daemon = false;
+      await until(async () => {
+        try {
+          await stat(`${state}.lock`);
+          return false;
+        } catch (error) {
+          return error.code === "ENOENT";
+        }
+      });
+    };
     const probe = async (url) => {
       const result = await cdp.send(
         "Runtime.evaluate",
@@ -178,11 +233,13 @@ test(
         JSON.stringify(result.exceptionDetails),
       );
     };
-    const completed = async (url) =>
+    const completed = async (url, wire = false) =>
       until(async () => {
         const rows = await call("requests");
         const row = rows.findLast((row) => row.url === url && row.complete);
-        return row && (await call("show", row.id));
+        if (!row) return;
+        const entry = await call("show", row.id);
+        return (!wire || entry.wireHeaders) && entry;
       });
 
     const started = await call(
@@ -194,11 +251,46 @@ test(
       "--extension",
       extensionId,
       "--sensitive",
+      "--pause-workers",
     );
     daemon = true;
-    assert.ok(
-      started.targets.some((target) => target.type === "service_worker"),
+    assert.equal(
+      (await cdp.send("Extensions.loadUnpacked", { path: extension })).id,
+      extensionId,
     );
+    const worker = await until(async () =>
+      (await call("targets")).find(
+        (target) =>
+          target.url === `chrome-extension://${extensionId}/worker.js` &&
+          target.attached,
+      ),
+    ).catch(async (error) => {
+      const [capture, targets, extensions, recorder] = await Promise.all([
+        call("status"),
+        cdp.Target.getTargets(),
+        cdp.send("Extensions.getExtensions"),
+        readFile(state + ".log", "utf8"),
+      ]);
+      throw new Error(
+        JSON.stringify({
+          message: error.message,
+          chrome: (process.env.CHROME_APP
+            ? await readFile(chromeLog, "utf8")
+            : logs
+          ).slice(-6000),
+          capture,
+          targets: targets.targetInfos,
+          extensions,
+          recorder,
+        }),
+        { cause: error },
+      );
+    });
+    ({ sessionId } = await cdp.Target.attachToTarget({
+      targetId: worker.id,
+      flatten: true,
+    }));
+    assert.equal(worker.type, "service_worker");
     assert.equal((await stat(state)).mode & 0o777, 0o600);
     const connection = JSON.parse(await readFile(state, "utf8"));
     assert.equal((await fetch(`${connection.url}/requests`)).status, 403);
@@ -224,7 +316,7 @@ test(
     const event = await reader.read();
     assert.match(new TextDecoder().decode(event.value), /data: /);
     streamAbort.abort();
-    const captured = await completed(`${base}/echo?token=query-secret`);
+    const captured = await completed(`${base}/echo?token=query-secret`, true);
     assert.equal(captured.target.type, "service_worker");
     const headers = Object.fromEntries(
       Object.entries(captured.requestHeaders).map(([key, value]) => [
@@ -308,16 +400,7 @@ test(
       call("replay", redirect.id, "--execute"),
       /without redirects/,
     );
-    await call("stop");
-    daemon = false;
-    await until(async () => {
-      try {
-        await stat(`${state}.lock`);
-        return false;
-      } catch (error) {
-        return error.code === "ENOENT";
-      }
-    });
+    await stopRecorder();
     assert.equal(
       (await cdp.Browser.getVersion()).product.startsWith("Chrome"),
       true,
@@ -358,6 +441,199 @@ test(
     await probe(`${base}/third`);
     await until(async () => (await call("requests")).length === 2);
     assert.ok(!(await call("requests")).some((row) => row.id === redacted.id));
+    const snapshot = await call("status");
+    assert.ok(snapshot.evictedRequests > 0);
+    const exported = join(root, "capture.json");
+    await call("export", "--output", exported);
+    assert.equal((await stat(exported)).mode & 0o777, 0o600);
+    const report = JSON.parse(await readFile(exported, "utf8"));
+    assert.equal(report.entries.length, 2);
+    assert.ok(!JSON.stringify(report).includes("cookie-secret"));
+    await assert.rejects(call("export", "--output", exported), /EEXIST/);
+    await assert.rejects(
+      call("wait", "--contains", "/missing", "--timeout", "100"),
+      /408/,
+    );
+    const waiting = call(
+      "wait",
+      "--contains",
+      "/fresh",
+      "--method",
+      "POST",
+      "--status",
+      "200",
+      "--after",
+      snapshot.lastRequestId,
+    );
+    await probe(base + "/fresh");
+    assert.equal((await waiting).url, base + "/fresh");
+    await stopRecorder();
+
+    await call(
+      "start",
+      "--cdp",
+      socket,
+      "--host",
+      "127.0.0.1",
+      "--extension",
+      extensionId,
+      "--pause-workers",
+    );
+    daemon = true;
+    t.diagnostic("startup capture and worker reloads");
+    for (let run = 0; run < 2; run++) {
+      const after = (await call("status")).lastRequestId;
+      await cdp.send("Extensions.uninstall", { id: extensionId });
+      await cdp.send("Extensions.loadUnpacked", { path: extension });
+      const startup = await call(
+        "wait",
+        "--contains",
+        "/startup",
+        "--after",
+        after,
+        "--status",
+        "200",
+      );
+      assert.equal(
+        startup.target.url,
+        "chrome-extension://" + extensionId + "/worker.js",
+      );
+    }
+    const other = join(root, "other-extension");
+    await mkdir(other);
+    await writeFile(
+      join(other, "manifest.json"),
+      JSON.stringify({
+        ...JSON.parse(await readFile(join(extension, "manifest.json"), "utf8")),
+        key: undefined,
+      }),
+    );
+    await writeFile(
+      join(other, "worker.js"),
+      "fetch(" + JSON.stringify(base + "/unselected-startup") + ")",
+    );
+    await cdp.send("Extensions.loadUnpacked", { path: other });
+    await until(() =>
+      received.some((item) => item.url === "/unselected-startup"),
+    );
+    assert.ok(
+      !(await call("requests")).some((row) =>
+        row.url.endsWith("/unselected-startup"),
+      ),
+    );
+
+    t.diagnostic("read-only media and target isolation");
+    const { targetId } = await cdp.Target.createTarget({
+      url: base + "/video",
+      background: true,
+    });
+    await until(async () =>
+      (await call("targets")).some(
+        (target) => target.id === targetId && target.attached,
+      ),
+    );
+    const { sessionId: pageSession } = await cdp.Target.attachToTarget({
+      targetId,
+      flatten: true,
+    });
+    await until(
+      async () =>
+        (
+          await cdp.send(
+            "Runtime.evaluate",
+            {
+              expression: 'document.querySelector("video")?.videoWidth',
+              returnByValue: true,
+            },
+            pageSession,
+          )
+        ).result.value === 64,
+    );
+    const play = await cdp.send(
+      "Runtime.evaluate",
+      {
+        expression: 'document.querySelector("video").play()',
+        awaitPromise: true,
+        userGesture: true,
+      },
+      pageSession,
+    );
+    assert.equal(play.exceptionDetails, undefined);
+    const media = await call(
+      "media",
+      "--target",
+      targetId,
+      "--duration",
+      "1500",
+    );
+    assert.equal(media.after[0].width, 64);
+    assert.equal(media.after[0].height, 48);
+    assert.ok(media.after[0].frames > media.before[0].frames);
+    assert.ok(media.after[0].time > media.before[0].time);
+    assert.equal(media.after[0].mediaKeysAttached, false);
+    await cdp.send(
+      "Runtime.evaluate",
+      { expression: 'document.querySelector("video").pause()' },
+      pageSession,
+    );
+    const paused = await call(
+      "media",
+      "--target",
+      targetId,
+      "--duration",
+      "100",
+    );
+    assert.equal(paused.after[0].paused, true);
+    assert.equal(paused.before[0].time, paused.after[0].time);
+    await stopRecorder();
+    await call(
+      "start",
+      "--cdp",
+      socket,
+      "--host",
+      "127.0.0.1",
+      "--target",
+      targetId,
+      "--pause-workers",
+    );
+    daemon = true;
+    assert.deepEqual(
+      (await call("targets")).map((target) => target.id),
+      [targetId],
+    );
+    await cdp.send(
+      "Runtime.evaluate",
+      { expression: 'fetch("/selected")', awaitPromise: true },
+      pageSession,
+    );
+    assert.equal(
+      (await call("wait", "--contains", "/selected")).target.id,
+      targetId,
+    );
+    const { targetId: excluded } = await cdp.Target.createTarget({
+      url: base + "/excluded",
+      background: true,
+    });
+    await until(() => received.some((item) => item.url === "/excluded"));
+    assert.ok(
+      !(await call("requests")).some((row) => row.url.endsWith("/excluded")),
+    );
+    await assert.rejects(call("media", "--target", excluded), /attached page/);
+    await cdp.Target.closeTarget({ targetId: excluded });
+    await cdp.Target.closeTarget({ targetId });
+    const exited = once(chrome, "exit");
+    await cdp.Browser.close();
+    await exited;
+    await until(async () => {
+      try {
+        await stat(state + ".lock");
+        return false;
+      } catch (e) {
+        return e.code === "ENOENT";
+      }
+    });
+    await assert.rejects(stat(state), { code: "ENOENT" });
+    daemon = false;
   },
 );
 

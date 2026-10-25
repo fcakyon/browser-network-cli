@@ -22,22 +22,25 @@ browser-network status
 
 `--profile` only reads the endpoint file. It does not launch Chrome or enable debugging. Alternatively use `--cdp ws://127.0.0.1:PORT/devtools/browser/ID` with Chrome's actual endpoint. Do not guess the port or browser ID. `--cdp http://127.0.0.1:PORT` works only when HTTP discovery is available.
 
-4. Verify status has the intended hosts and attached targets. Reproduce the browser action after attachment, then inspect requests:
+4. Use `browser-network targets` and status to verify the intended hosts, exact extension/target IDs and attachment status. Reproduce the browser action after attachment, then inspect requests:
 
 ```sh
 browser-network requests --contains /api/
 browser-network show REQUEST_ID
+browser-network wait --contains /api/ --method POST --status 200 --after LAST_REQUEST_ID --timeout 10000
 ```
 
 For bodies, cookies, authorization values or WebSocket payloads, choose `--sensitive` when starting capture. Default mode omits them. Repeat `--host` for separate API/CDN hosts. Each host includes its subdomains. Add `--extension ID` for extension background workers. Their destinations must also match the host scope.
 
-5. Save needed evidence before stopping. Sensitive `show` output belongs in an ignored private directory with `umask 077`, not shared terminal output or tracked files. Inspect field names, byte counts and redacted summaries instead of secrets. Use `browser-network stop` only for a capture you own. It clears in-memory evidence and leaves Chrome running. Close only temporary tabs and servers created for the task.
+For startup evidence, use `--pause-workers` before loading the extension in a dedicated test browser. Use `media --target PAGE_ID` to inspect video without screen capture, which can disturb protected playback. Keep login, license and decoded-output checks separate.
+
+5. Save needed evidence with `export --output /private/path/capture.json` before stopping. Exports preserve the selected sensitive/redacted mode, refuse overwrite and include evicted-request counts. Sensitive `show` output belongs in an ignored private directory with `umask 077`, not shared terminal output or tracked files. Inspect field names, byte counts and redacted summaries instead of secrets. Use `browser-network stop` only for a capture you own. It clears in-memory evidence and leaves Chrome running. Close only temporary tabs and servers created for the task.
 
 ## Diagnose failures
 
 - Failed `/json/version` is not proof debugging is off. Chrome's consent-based mode can expose the browser WebSocket without HTTP discovery. Try `--profile` or the actual WebSocket URL. Raw `chrome-remote-interface` clients need `local: true` to avoid fetching the protocol through that unavailable HTTP endpoint. The CLI already does this.
 - Missing `DevToolsActivePort`: confirm the profile root and Remote Debugging toggle. A stale endpoint or refused connection requires checking Chrome's current debugging state, not changing credentials or restarting unrelated sessions.
-- No requests: check scope and attached targets, then repeat the action after capture starts. New workers may issue their first requests before attachment. A valid connection with zero targets is not capture proof.
+- No requests: check scope and attached targets, then repeat the action after capture starts. Normal attachment can miss worker startup requests. Only the explicit service-worker startup mode changes that ordering. A valid connection with zero targets is not capture proof.
 - Missing bodies or frames: check sensitive mode, Chrome's body availability and [retention limits](https://github.com/fcakyon/browser-network-cli/blob/main/docs/usage.md#coverage-and-limits). `droppedFrames` indicates frame loss. Export needed evidence promptly.
 - Missing state file from `status` means no recorder at that path, not an incompatible browser. Check owner and PID before removing stale state or locks.
 

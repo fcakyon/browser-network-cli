@@ -17,7 +17,7 @@ Give any shell-enabled coding agent a reusable view of website and Chrome extens
 
 - A failed local connection is not evidence that another tool lacks the feature. Verify setup and primary documentation before making comparisons.
 - Separate tested behavior, documented capabilities, and unknown coverage. Never turn “not verified” into “unsupported”.
-- Keep README short. Put limitations and reference detail in docs/usage.md. Describe what the tool does without vague phrases such as “shared local”.
+- Keep Markdown concise and free of semicolons. Put limits in docs/usage.md and describe concrete behavior.
 - Keep visuals simple and readable in both GitHub themes. Avoid oversized banners, decorative gradients, and low-contrast arrows.
 
 ## Verification and releases

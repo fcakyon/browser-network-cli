@@ -13,6 +13,8 @@ type Body = {
 export type CaptureOptions = {
   hosts: string[];
   extensions: string[];
+  targetIds: string[];
+  pauseWorkers: boolean;
   sensitive: boolean;
   limit: number;
   bodyLimit: number;
@@ -57,6 +59,8 @@ export class Capture extends EventEmitter {
   private sessions = new Map<string, Target>();
   private attaching = new Set<string>();
   private sequence = 0;
+  private evicted = 0;
+  private pending = new Set<Promise<void>>();
   private bytes = new Map<string, number>();
   private totalBytes = 0;
   private closed = false;
@@ -85,6 +89,8 @@ export class Capture extends EventEmitter {
 
   private selected(info: Target): boolean {
     return (
+      (!this.options.targetIds.length ||
+        this.options.targetIds.includes(info.targetId)) &&
       [
         "page",
         "iframe",
@@ -147,6 +153,7 @@ export class Capture extends EventEmitter {
     ) {
       const oldest = this.entries.values().next().value!;
       this.entries.delete(oldest.id);
+      this.evicted++;
       this.totalBytes -= this.bytes.get(oldest.id) || 0;
       this.bytes.delete(oldest.id);
       const key = `${oldest.sessionId}:${oldest.requestId}`;
@@ -186,16 +193,36 @@ export class Capture extends EventEmitter {
 
   async start(): Promise<void> {
     this.client.on("event", (message) => {
-      void this.event(message.method, message.params, message.sessionId).catch(
-        (error) => this.note(error),
-      );
+      const task = this.event(
+        message.method,
+        message.params,
+        message.sessionId,
+      ).catch((error) => this.note(error));
+      if (message.method.startsWith("Target.")) {
+        this.pending.add(task);
+        void task.finally(() => this.pending.delete(task));
+      }
     });
+    this.emit("startup", "Configuring worker attachment");
+    if (this.options.pauseWorkers)
+      await this.client.Target.setAutoAttach({
+        autoAttach: true,
+        waitForDebuggerOnStart: true,
+        flatten: true,
+        filter: [{ type: "service_worker" }, { exclude: true }],
+      });
+    this.emit("startup", "Discovering targets");
     await this.client.Target.setDiscoverTargets({ discover: true });
     const { targetInfos } = await this.client.Target.getTargets();
+    this.emit("startup", "Attaching selected targets");
     await Promise.all(targetInfos.map((info) => this.attach(info)));
+    this.emit("startup", "Waiting for initial target events");
+    await Promise.all(this.pending);
+    this.emit("startup", "Capture ready");
   }
 
   private async attach(info: Target): Promise<void> {
+    if (this.options.pauseWorkers && info.type === "service_worker") return;
     const existing = this.targets.get(info.targetId);
     if (!this.selected(info)) {
       if (existing) {
@@ -216,6 +243,7 @@ export class Capture extends EventEmitter {
     this.attaching.add(info.targetId);
     let sessionId: string | undefined;
     try {
+      this.emit("startup", `Attaching ${info.type}`);
       ({ sessionId } = await this.client.Target.attachToTarget({
         targetId: info.targetId,
         flatten: true,
@@ -224,17 +252,7 @@ export class Capture extends EventEmitter {
         await this.client.Target.detachFromTarget({ sessionId });
         return;
       }
-      this.sessions.set(sessionId, info);
-      await this.client.send(
-        "Network.enable",
-        {
-          maxTotalBufferSize: this.options.bodyLimit * 4,
-          maxResourceBufferSize: this.options.bodyLimit,
-          maxPostDataSize: this.options.bodyLimit,
-        },
-        sessionId,
-      );
-      this.targets.set(info.targetId, { info, sessionId });
+      await this.observe(info, sessionId);
     } catch (error) {
       if (sessionId) {
         this.sessions.delete(sessionId);
@@ -248,12 +266,81 @@ export class Capture extends EventEmitter {
     }
   }
 
+  private async observe(info: Target, sessionId: string): Promise<void> {
+    this.sessions.set(sessionId, info);
+    this.emit("startup", `Enabling network for ${info.type}`);
+    await this.client.send(
+      "Network.enable",
+      {
+        maxTotalBufferSize: this.options.bodyLimit * 4,
+        maxResourceBufferSize: this.options.bodyLimit,
+        maxPostDataSize: this.options.bodyLimit,
+      },
+      sessionId,
+    );
+    this.targets.set(info.targetId, { info, sessionId });
+    this.emit("startup", `Observing ${info.type}`);
+  }
+
+  async listTargets() {
+    const { targetInfos } = await this.client.Target.getTargets();
+    return targetInfos
+      .filter((info) => this.selected(info))
+      .map((info) => ({
+        id: info.targetId,
+        type: info.type,
+        url: this.url(info.url),
+        attached: this.targets.has(info.targetId),
+      }));
+  }
+
+  async media(targetId: string, duration: number) {
+    const target = this.targets.get(targetId);
+    if (!target || !["page", "iframe"].includes(target.info.type))
+      throw new Error("Choose an attached page or iframe target");
+    const expression =
+      "Array.from(document.querySelectorAll('video'), (v, index) => ({index, time: v.currentTime, paused: v.paused, ended: v.ended, width: v.videoWidth, height: v.videoHeight, readyState: v.readyState, frames: v.getVideoPlaybackQuality().totalVideoFrames, droppedFrames: v.getVideoPlaybackQuality().droppedVideoFrames, mediaKeysAttached: Boolean(v.mediaKeys), error: v.error ? {code: v.error.code, message: v.error.message} : null}))";
+    const sample = async () => {
+      const result = (await this.client.send(
+        "Runtime.evaluate",
+        { expression, returnByValue: true },
+        target.sessionId,
+      )) as Protocol.Runtime.EvaluateResponse;
+      if (result.exceptionDetails)
+        throw new Error("Video state evaluation failed");
+      return result.result.value;
+    };
+    const before = await sample();
+    await new Promise((resolve) => setTimeout(resolve, duration));
+    return { targetId, durationMs: duration, before, after: await sample() };
+  }
+
   private async event(
     method: string,
     params: unknown,
     sessionId?: string,
   ): Promise<void> {
     if (this.closed) return;
+    if (method === "Target.attachedToTarget" && this.options.pauseWorkers) {
+      const {
+        targetInfo,
+        sessionId: attached,
+        waitingForDebugger,
+      } = params as Protocol.Target.AttachedToTargetEvent;
+      try {
+        if (this.selected(targetInfo)) await this.observe(targetInfo, attached);
+      } finally {
+        if (waitingForDebugger)
+          await this.client.send(
+            "Runtime.runIfWaitingForDebugger",
+            undefined,
+            attached,
+          );
+        if (!this.selected(targetInfo))
+          await this.client.Target.detachFromTarget({ sessionId: attached });
+      }
+      return;
+    }
     if (
       method === "Target.targetCreated" ||
       method === "Target.targetInfoChanged"
@@ -445,6 +532,10 @@ export class Capture extends EventEmitter {
         url: this.url(info.url),
       })),
       requests: this.entries.size,
+      lastRequestId: String(this.sequence),
+      evictedRequests: this.evicted,
+      pauseWorkers: this.options.pauseWorkers,
+      targetIds: this.options.targetIds,
       retainedBytes: this.totalBytes,
       errors: this.errors,
     };

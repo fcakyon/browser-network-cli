@@ -14,7 +14,7 @@ browser-network start --cdp ws://127.0.0.1:9222/devtools/browser/ID \
   --extension EXTENSION_ID --sensitive
 ```
 
-Find extension IDs in `chrome://extensions`. Repeat `--host` and `--extension` as needed. Each host includes its subdomains and limits request destinations, including extension requests. Add API/CDN hosts explicitly.
+Use `browser-network targets` to list targets within the capture scope and their attachment status. Add `--target ID` when starting a recorder to restrict it to a specific target. Find extension IDs in `chrome://extensions`. Repeat `--host` and `--extension` as needed. Each host includes its subdomains and limits request destinations, including extension requests. Add API/CDN hosts explicitly.
 
 Capture uses existing Chrome sessions. It does not install Chrome, copy your profile, or change browser security settings.
 
@@ -41,16 +41,34 @@ Replay makes a **real request** with captured credentials. It does not follow re
 ## Coverage and limits
 
 - Capture covers selected Chrome targets, including extension service workers. It does not capture all traffic on your computer or inbound server traffic.
-- Capture starts after attachment. A new worker's earliest requests can be missed. Content-script requests may appear under the page target.
+- Normal capture starts after attachment. A new worker's earliest requests can be missed. Content-script requests may appear under the page target.
 - Header events arriving before a permitted request URL is known are discarded. Such requests may lack full wire headers and cannot be replayed.
 - Chrome may discard response bodies, serve cached responses without all events, or omit upload data. Missing bodies are reported explicitly.
 - No media decryption is performed.
 
 Default limits: **500 requests**, **256 KiB per body**, and **64 MiB of serialized capture data**. WebSockets retain their latest 100 frames, and `droppedFrames` counts older ones. Old requests are evicted when limits are reached. Use `--limit` and `--body-limit` to adjust the first two limits.
 
+## Scripted checks
+
+Use completed requests as bounded checkpoints instead of sleeping or repeatedly listing traffic:
+
+```sh
+browser-network status  # lastRequestId is a checkpoint for the next action
+browser-network wait --contains /connect --method POST --status 200 --after 12 --timeout 10000
+browser-network export --output /private/path/capture.json
+browser-network media --target PAGE_ID --duration 1000
+```
+
+- `wait`: match a completed request newer than `--after`. Timeout returns 408. Check `error` when no status filter is set.
+- `export`: save retained data and loss counts to a new owner-only JSON file. Sensitive mode stays sensitive.
+- `media`: sample video dimensions, frames and time without screenshots or playback changes. Use the video's page or iframe target. Media keys alone do not prove playback.
+- `--pause-workers`: arm capture before loading/restarting a service worker in a dedicated test browser. It briefly pauses new service workers, including out-of-scope ones. Existing requests and dedicated/shared-worker startup are not covered.
+
+Verify provider login, title access and decoded playback separately. Screen capture can trigger output-protection errors. Do not stop shared capture services to work around them.
+
 ## Share with agents
 
-Start capture once and query it from any terminal, Claude session, or Codex session on the same machine. The daemon owns one persistent Chrome connection. Commands such as status, requests, show, and tail query its local API without opening another Chrome connection. Chrome may request approval again after the daemon or browser restarts. Data stays in memory and is cleared on `stop`. Chrome remains open.
+One daemon shares a Chrome connection across local CLI and agent sessions. `stop` clears captured data and leaves Chrome open.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
 
@@ -62,6 +80,10 @@ The state file has owner-only permissions and contains the localhost API URL and
 | GET | `/requests` | Request summaries |
 | GET | `/requests/ID` | Full retained request |
 | GET | `/events` | Live summaries through SSE |
+| GET | `/targets` | Scoped targets and attachment status |
+| GET | `/wait?contains=TEXT&after=ID&timeout=MS` | Completed match, optional method/status filters |
+| GET | `/export` | Capture snapshot with loss metadata |
+| GET | `/media?target=ID&duration=MS` | Read-only video samples, 1–10,000 ms apart |
 | POST | `/stop` | Stop capture and clear memory |
 
 Send `Authorization: Bearer TOKEN`. Requests with a browser Origin header are denied. There is no public tunnel or remote bind option.
@@ -77,6 +99,8 @@ CHROME_PATH="/path/to/Chrome for Testing" npm test
 ```
 
 The integration test uses an isolated Manifest V3 extension and a local server with synthetic credentials. It checks worker capture, Cookie/Authorization and body retention, replay, WebSockets, redaction, host scope, API authentication, eviction, and daemon lifecycle. It never uses your browsing profile.
+
+macOS CI uses `CHROME_APP` to launch headless Chrome through LaunchServices with its sandbox enabled. Linux CI sets `CHROME_NO_SANDBOX=1` for localhost fixtures only. The CLI never changes browser sandbox settings.
 
 Without `CHROME_PATH`, the browser test is skipped and the CLI smoke test still runs. To test an installed package with the same suite, set `BROWSER_NETWORK_CLI` to its `dist/cli.js` path.
 

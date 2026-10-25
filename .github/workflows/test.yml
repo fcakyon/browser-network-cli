@@ -1,0 +1,47 @@
+name: Real browser tests
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  browser:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    env:
+      CHROME_NO_SANDBOX: ${{ matrix.os == 'ubuntu-latest' && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - uses: browser-actions/setup-chrome@v2
+        id: chrome
+        with:
+          chrome-version: stable
+          install-dependencies: ${{ runner.os == 'Linux' }}
+      - name: Prepare macOS application launch
+        if: runner.os == 'macOS'
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          ditto "${CHROME_PATH%/Contents/MacOS/*}" "$RUNNER_TEMP/Chrome for Testing.app"
+          echo "CHROME_APP=$RUNNER_TEMP/Chrome for Testing.app" >> "$GITHUB_ENV"
+      - run: npm ci
+      - run: npm test
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+      - name: Test installed archive
+        shell: bash
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          archive_name=$(npm pack --pack-destination "$RUNNER_TEMP" --silent)
+          npm install --prefix "$RUNNER_TEMP/installed" --ignore-scripts --no-audit --no-fund "$RUNNER_TEMP/$archive_name"
+          BROWSER_NETWORK_CLI="$RUNNER_TEMP/installed/node_modules/@fcakyon/browser-network-cli/dist/cli.js" node --test test/*.test.mjs

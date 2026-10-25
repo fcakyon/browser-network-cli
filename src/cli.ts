@@ -22,6 +22,14 @@ const { values: args, positionals } = parseArgs({
   options: {
     host: { type: "string", multiple: true, default: [] },
     extension: { type: "string", multiple: true, default: [] },
+    target: { type: "string", multiple: true, default: [] },
+    "pause-workers": { type: "boolean", default: false },
+    method: { type: "string" },
+    status: { type: "string" },
+    after: { type: "string", default: "0" },
+    timeout: { type: "string", default: "10000" },
+    duration: { type: "string", default: "1000" },
+    output: { type: "string" },
     cdp: { type: "string" },
     profile: { type: "string" },
     sensitive: { type: "boolean", default: false },
@@ -50,7 +58,10 @@ const help = `browser-network ${version}: shared local Chrome network capture
 
   start --cdp URL --host example.com [--extension ID] [--sensitive]
   start --profile '/path/to/Chrome/profile-root' --host example.com
-  status | stop | requests [--contains TEXT] | show ID | tail
+  status | targets | stop | requests [--contains TEXT] | show ID | tail
+  wait --contains TEXT [--method POST] [--status 200] [--after ID] [--timeout MS]
+  export --output PRIVATE_FILE.json
+  media --target PAGE_ID [--duration MS]
   replay ID --execute
 
 INSTALL
@@ -68,6 +79,10 @@ SCOPE
   Only matching page/iframe/worker targets and explicit --extension IDs attach.
   Requests from extension background workers must also match a permitted host.
   Add API/CDN hosts explicitly. No system-wide capture or public tunnel.
+  --target ID restricts target selection in addition to host/extension scope.
+  --pause-workers opts into pausing new service workers until capture is enabled. Use it
+  only with a dedicated test browser: it briefly pauses all new service workers,
+  immediately resumes out-of-scope workers, and never restarts existing workers.
   Capture begins after target attachment. The first requests of a newly created
   worker may precede attachment. Content-script requests may appear on the page
   target. Chrome-target coverage does not imply all operating-system traffic.
@@ -173,7 +188,8 @@ async function serve(): Promise<void> {
       response.writeHead(403).end();
       return;
     }
-    const path = new URL(request.url!, "http://127.0.0.1").pathname;
+    const url = new URL(request.url!, "http://127.0.0.1");
+    const path = url.pathname;
     if (request.method === "GET" && path === "/events") {
       response.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -186,7 +202,80 @@ async function serve(): Promise<void> {
     }
     response.setHeader("Content-Type", "application/json");
     response.setHeader("Cache-Control", "no-store");
-    if (request.method === "GET" && path === "/status")
+    if (request.method === "GET" && path === "/wait") {
+      const timeout = Number(url.searchParams.get("timeout"));
+      const after = Number(url.searchParams.get("after") || 0);
+      if (
+        !Number.isInteger(timeout) ||
+        timeout < 1 ||
+        timeout > 120000 ||
+        !Number.isInteger(after) ||
+        after < 0
+      ) {
+        response.writeHead(400).end("{}");
+        return;
+      }
+      const contains = url.searchParams.get("contains") || "";
+      const method = url.searchParams.get("method");
+      const status = url.searchParams.get("status");
+      const matches = (item: Entry) =>
+        Number(item.id) > after &&
+        item.complete &&
+        item.url.includes(contains) &&
+        (!method || item.method === method) &&
+        (!status || String(item.status) === status);
+      const check = ({ id }: { id: string }) => {
+        const entry = capture!.entries.get(id);
+        if (entry && matches(entry)) {
+          cleanup();
+          response.end(JSON.stringify(entry));
+        }
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        return response.writeHead(408).end(
+          JSON.stringify({
+            error: "No matching completed request before deadline",
+          }),
+        );
+      }, timeout);
+      const cleanup = () => {
+        clearTimeout(timer);
+        capture!.off("request", check);
+      };
+      capture!.on("request", check);
+      response.on("close", cleanup);
+      const existing = [...capture!.entries.values()].find(matches);
+      if (existing) check(existing);
+    } else if (request.method === "GET" && path === "/targets") {
+      void capture!
+        .listTargets()
+        .then((value) => response.end(JSON.stringify(value)))
+        .catch((error) =>
+          response.writeHead(502).end(JSON.stringify({ error: error.message })),
+        );
+    } else if (request.method === "GET" && path === "/media") {
+      const duration = Number(url.searchParams.get("duration"));
+      if (!Number.isInteger(duration) || duration < 1 || duration > 10000) {
+        response.writeHead(400).end("{}");
+        return;
+      }
+      void capture!
+        .media(url.searchParams.get("target") || "", duration)
+        .then((value) => response.end(JSON.stringify(value)))
+        .catch((error) =>
+          response.writeHead(400).end(JSON.stringify({ error: error.message })),
+        );
+    } else if (request.method === "GET" && path === "/export") {
+      response.end(
+        JSON.stringify({
+          schemaVersion: 1,
+          capturedAt: new Date().toISOString(),
+          ...capture!.status(),
+          entries: [...capture!.entries.values()],
+        }),
+      );
+    } else if (request.method === "GET" && path === "/status")
       response.end(JSON.stringify({ pid: process.pid, ...capture!.status() }));
     else if (request.method === "GET" && path === "/requests")
       response.end(
@@ -232,10 +321,13 @@ async function serve(): Promise<void> {
     void shutdown().then(() => process.exit(0));
   });
   try {
+    console.error("Connecting to Chrome");
     const client = await CDP({ target: await endpoint(), local: true });
     capture = new Capture(client, {
       hosts: args.host,
       extensions: args.extension,
+      targetIds: args.target,
+      pauseWorkers: args["pause-workers"],
       sensitive: args.sensitive,
       limit,
       bodyLimit,
@@ -243,6 +335,7 @@ async function serve(): Promise<void> {
     client.on("disconnect", () => {
       void shutdown();
     });
+    capture.on("startup", (phase) => console.error(phase));
     await capture.start();
     capture.on("request", (data) => {
       const event = `data: ${JSON.stringify(data)}\n\n`;
@@ -276,9 +369,21 @@ async function api(path: string, method = "GET"): Promise<Response> {
   const response = await fetch(`${state.url}${path}`, {
     method,
     headers: { Authorization: `Bearer ${state.token}` },
-    signal: path === "/events" ? undefined : AbortSignal.timeout(5000),
+    signal:
+      path === "/events"
+        ? undefined
+        : AbortSignal.timeout(
+            path.startsWith("/wait?")
+              ? Number(args.timeout) + 5000
+              : path.startsWith("/media?")
+                ? Number(args.duration) + 5000
+                : 5000,
+          ),
   });
-  if (!response.ok) throw new Error(`Local API returned ${response.status}`);
+  if (!response.ok)
+    throw new Error(
+      `Local API returned ${response.status}: ${await response.text()}`,
+    );
   return response;
 }
 
@@ -292,9 +397,13 @@ async function start(): Promise<void> {
   );
   await log.close();
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       child.kill("SIGTERM");
-      reject(new Error(`Chrome connection timed out. Check ${args.state}.log`));
+      reject(
+        new Error(
+          `Chrome connection timed out. ${await readFile(`${args.state}.log`, "utf8")}`,
+        ),
+      );
     }, 30000);
     child.once("message", () => {
       clearTimeout(timer);
@@ -385,6 +494,43 @@ async function main(): Promise<void> {
   if (command === "serve") return serve();
   if (command === "start") return start();
   if (command === "replay") return replay();
+  if (command === "wait") {
+    const query = new URLSearchParams({
+      contains: args.contains,
+      after: args.after,
+      timeout: args.timeout,
+    });
+    if (args.method) query.set("method", args.method);
+    if (args.status) query.set("status", args.status);
+    console.log(await (await api("/wait?" + query)).text());
+    return;
+  }
+  if (command === "media") {
+    if (args.target.length !== 1)
+      throw new Error("media requires exactly one --target page ID");
+    console.log(
+      await (
+        await api(
+          "/media?" +
+            new URLSearchParams({
+              target: args.target[0],
+              duration: args.duration,
+            }),
+        )
+      ).text(),
+    );
+    return;
+  }
+  if (command === "export") {
+    if (!args.output)
+      throw new Error("export requires --output PRIVATE_FILE.json");
+    const data = await (await api("/export")).text();
+    await writeFile(args.output, data + "\n", { mode: 0o600, flag: "wx" });
+    console.log(
+      JSON.stringify({ path: args.output, bytes: Buffer.byteLength(data) }),
+    );
+    return;
+  }
   if (command === "tail") {
     const response = await api("/events");
     let pending = "";
@@ -400,6 +546,7 @@ async function main(): Promise<void> {
   }
   const routes: Record<string, string> = {
     status: "/status",
+    targets: "/targets",
     stop: "/stop",
     requests: "/requests",
     show: `/requests/${id}`,
