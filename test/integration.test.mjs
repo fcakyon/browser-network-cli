@@ -97,10 +97,10 @@ test(
         "--headless=new",
         "--no-first-run",
         "--no-default-browser-check",
+        "--use-mock-keychain",
         `--user-data-dir=${join(root, "profile")}`,
         "--remote-debugging-port=0",
-        `--disable-extensions-except=${extension}`,
-        `--load-extension=${extension}`,
+        "--enable-unsafe-extension-debugging",
         "about:blank",
       ],
       { stdio: ["ignore", "ignore", "pipe"] },
@@ -140,14 +140,16 @@ test(
       chrome.once("error", reject);
     });
     cdp = await CDP({ target: socket, local: true });
+    const { id: extensionId } = await cdp.send("Extensions.loadUnpacked", {
+      path: extension,
+    });
     const worker = await until(async () =>
       (await cdp.Target.getTargets()).targetInfos.find(
         (info) =>
           info.type === "service_worker" &&
-          info.url.startsWith("chrome-extension://"),
+          info.url === `chrome-extension://${extensionId}/worker.js`,
       ),
     );
-    const extensionId = new URL(worker.url).hostname;
     const { sessionId } = await cdp.Target.attachToTarget({
       targetId: worker.targetId,
       flatten: true,

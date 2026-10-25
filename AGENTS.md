@@ -23,6 +23,6 @@ Give any shell-enabled coding agent a reusable view of website and Chrome extens
 ## Verification and releases
 
 - Run the integration suite with CHROME_PATH pointing to Chrome for Testing. A skipped browser test does not verify a release. Test the installed archive through BROWSER_NETWORK_CLI too.
-- Use synthetic credentials and isolated test profiles. Stop only processes and tabs created for the test.
+- Use synthetic credentials and isolated test profiles with `--use-mock-keychain`, so cookie setup never requests personal Chromium Safe Storage access. Load the fixture with `Extensions.loadUnpacked` and select its exact worker URL from the returned extension ID. Stop only processes and tabs created for the test.
 - Follow [.agents/skills/release/SKILL.md](.agents/skills/release/SKILL.md) when preparing a release or editing release notes. Keep one-command installation working.
 - Review and simplify changes before committing. Use short conventional commit subjects. Publish to npm only when authorized.
