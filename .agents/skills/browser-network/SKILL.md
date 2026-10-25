@@ -32,7 +32,7 @@ browser-network wait --contains /api/ --method POST --status 200 --after LAST_RE
 
 For bodies, cookies, authorization values or WebSocket payloads, choose `--sensitive` when starting capture. Default mode omits them. Repeat `--host` for separate API/CDN hosts. Each host includes its subdomains. Add `--extension ID` for extension background workers. Their destinations must also match the host scope.
 
-For startup failures, use `--pause-workers` only in a dedicated test browser, before loading/restarting the extension. This briefly pauses new service workers until observation is ready; it cannot recover earlier requests. Keep provider sessions, permission failures and playback outcomes separate. Use `media --target PAGE_ID` for read-only frame/time/dimension evidence before considering screenshots, since screen capture can disturb protected playback.
+For startup failures, use `--pause-workers` only in a dedicated test browser, before loading/restarting the extension. This briefly pauses new service workers until observation is ready. It cannot recover earlier requests. Keep provider sessions, permission failures and playback outcomes separate. Use `media --target PAGE_ID` for read-only frame/time/dimension evidence before considering screenshots, since screen capture can disturb protected playback.
 
 5. Save needed evidence with `export --output /private/path/capture.json` before stopping. Exports preserve the selected sensitive/redacted mode, refuse overwrite and include evicted-request counts. Sensitive `show` output belongs in an ignored private directory with `umask 077`, not shared terminal output or tracked files. Inspect field names, byte counts and redacted summaries instead of secrets. Use `browser-network stop` only for a capture you own. It clears in-memory evidence and leaves Chrome running. Close only temporary tabs and servers created for the task.
 
@@ -40,7 +40,7 @@ For startup failures, use `--pause-workers` only in a dedicated test browser, be
 
 - Failed `/json/version` is not proof debugging is off. Chrome's consent-based mode can expose the browser WebSocket without HTTP discovery. Try `--profile` or the actual WebSocket URL. Raw `chrome-remote-interface` clients need `local: true` to avoid fetching the protocol through that unavailable HTTP endpoint. The CLI already does this.
 - Missing `DevToolsActivePort`: confirm the profile root and Remote Debugging toggle. A stale endpoint or refused connection requires checking Chrome's current debugging state, not changing credentials or restarting unrelated sessions.
-- No requests: check scope and attached targets, then repeat the action after capture starts. Normal attachment can miss worker startup requests; only the explicit service-worker startup mode changes that ordering. A valid connection with zero targets is not capture proof.
+- No requests: check scope and attached targets, then repeat the action after capture starts. Normal attachment can miss worker startup requests. Only the explicit service-worker startup mode changes that ordering. A valid connection with zero targets is not capture proof.
 - Missing bodies or frames: check sensitive mode, Chrome's body availability and [retention limits](https://github.com/fcakyon/browser-network-cli/blob/main/docs/usage.md#coverage-and-limits). `droppedFrames` indicates frame loss. Export needed evidence promptly.
 - Missing state file from `status` means no recorder at that path, not an incompatible browser. Check owner and PID before removing stale state or locks.
 

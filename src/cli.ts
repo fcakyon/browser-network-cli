@@ -321,6 +321,7 @@ async function serve(): Promise<void> {
     void shutdown().then(() => process.exit(0));
   });
   try {
+    console.error("Connecting to Chrome");
     const client = await CDP({ target: await endpoint(), local: true });
     capture = new Capture(client, {
       hosts: args.host,
@@ -334,6 +335,7 @@ async function serve(): Promise<void> {
     client.on("disconnect", () => {
       void shutdown();
     });
+    capture.on("startup", (phase) => console.error(phase));
     await capture.start();
     capture.on("request", (data) => {
       const event = `data: ${JSON.stringify(data)}\n\n`;
@@ -395,9 +397,13 @@ async function start(): Promise<void> {
   );
   await log.close();
   await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       child.kill("SIGTERM");
-      reject(new Error(`Chrome connection timed out. Check ${args.state}.log`));
+      reject(
+        new Error(
+          `Chrome connection timed out. ${await readFile(`${args.state}.log`, "utf8")}`,
+        ),
+      );
     }, 30000);
     child.once("message", () => {
       clearTimeout(timer);

@@ -201,6 +201,7 @@ export class Capture extends EventEmitter {
       this.pending.add(task);
       void task.finally(() => this.pending.delete(task));
     });
+    this.emit("startup", "Configuring worker attachment");
     if (this.options.pauseWorkers)
       await this.client.Target.setAutoAttach({
         autoAttach: true,
@@ -208,10 +209,14 @@ export class Capture extends EventEmitter {
         flatten: true,
         filter: [{ type: "service_worker" }, { exclude: true }],
       });
+    this.emit("startup", "Discovering targets");
     await this.client.Target.setDiscoverTargets({ discover: true });
     const { targetInfos } = await this.client.Target.getTargets();
+    this.emit("startup", "Attaching selected targets");
     await Promise.all(targetInfos.map((info) => this.attach(info)));
+    this.emit("startup", "Waiting for initial target events");
     await Promise.all(this.pending);
+    this.emit("startup", "Capture ready");
   }
 
   private async attach(info: Target): Promise<void> {
