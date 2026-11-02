@@ -126,10 +126,12 @@ SHARING
   A scope, data-mode, or limit mismatch fails without another Chrome connection.
   All local Claude/Codex sessions can use the same daemon. --state selects its
   state file (default: ${args.state}). The file is mode 0600 and contains the
-  local API bearer token. Capture data stays in memory and is cleared on stop.
+  local API bearer token. Each state path registers one caller. stop releases it.
+  Only the last caller stops the daemon and clears its in-memory evidence.
   tail streams request summaries as JSON lines. show returns full retained data.
   The localhost API: GET /status, /requests, /requests/ID, /events (SSE), /targets,
-  /wait, /media, /export, POST /cdp and /stop.
+  /wait, /media, /export, POST /cdp, /attach and /stop. The latter two take
+  {state: absolute state path} to register or release a caller.
   Agents must use POST /cdp {method, params, targetId?} for page CDP, never open
   their own WebSocket to DevToolsActivePort. Requires --sensitive, returns raw
   results and can change page state. Browser-level access is Browser.getVersion
@@ -143,7 +145,9 @@ REPLAY
   Redirects are not followed. Expired signatures and browser-only state may fail.
   Transport-managed headers are regenerated. Response output is capped at 1 MiB.
 
-stop disconnects capture, leaves Chrome running, and removes state and lock files.
+stop removes the selected state and lock files. The last caller also disconnects
+capture and removes the endpoint registry and lock before replying. Chrome stays
+running. Stopping an absent state path succeeds with {"released":false}.
 `;
 
 async function endpoint(): Promise<string> {
@@ -208,8 +212,10 @@ async function serve(): Promise<void> {
   await lock.writeFile(String(process.pid));
   await lock.close();
   let capture: Capture | undefined;
-  let stopping = false,
-    stateWritten = false;
+  let stopping = false;
+  let lifecycle = Promise.resolve();
+  const states = new Set<string>();
+  let state: State;
   let registered: string | undefined;
   const clients = new Set<ServerResponse>();
   const token = randomBytes(32).toString("hex");
@@ -355,8 +361,48 @@ async function serve(): Promise<void> {
       capture!.entries.has(path.split("/")[2])
     )
       response.end(JSON.stringify(capture!.entries.get(path.split("/")[2])));
-    else if (request.method === "POST" && path === "/stop") {
-      void shutdown(response);
+    else if (request.method === "POST" && ["/attach", "/stop"].includes(path)) {
+      lifecycle = lifecycle
+        .then(async () => {
+          if (stopping) throw new Error("Daemon is stopping");
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const { state: file } = JSON.parse(Buffer.concat(chunks).toString());
+          if (typeof file !== "string" || resolve(file) !== file)
+            throw new Error("Expected {state: absolute state path}");
+          if (path === "/attach") {
+            if (!states.has(file)) {
+              await mkdir(dirname(file), { recursive: true, mode: 0o700 });
+              const lock = await open(`${file}.lock`, "wx", 0o600);
+              await lock.writeFile(String(process.pid));
+              await lock.close();
+              try {
+                await writeState(file, { ...state, state: file });
+              } catch (error) {
+                await unlink(`${file}.lock`);
+                throw error;
+              }
+              states.add(file);
+            }
+            response.end(
+              JSON.stringify({ pid: process.pid, ...capture!.status() }),
+            );
+            return;
+          }
+          const released = states.has(file);
+          if (released && states.size === 1) return shutdown(response);
+          if (released) {
+            const remaining = [...states].find((path) => path !== file)!;
+            await writeState(registered!, { ...state, state: remaining });
+            await unlink(file);
+            await unlink(`${file}.lock`);
+            states.delete(file);
+          }
+          response.end(JSON.stringify({ released, remaining: states.size }));
+        })
+        .catch((error) => {
+          response.writeHead(400).end(JSON.stringify({ error: error.message }));
+        });
     } else response.writeHead(404).end("{}");
   });
   async function shutdown(response?: ServerResponse): Promise<void> {
@@ -365,21 +411,24 @@ async function serve(): Promise<void> {
     for (const client of clients) client.end();
     server.close();
     await capture?.close();
-    if (stateWritten) {
-      await unlink(args.state);
-      await unlink(registered!);
-    }
+    await Promise.all(
+      [...states].flatMap((file) => [unlink(file), unlink(`${file}.lock`)]),
+    );
+    if (states.size) await unlink(registered!);
     if (registered) await unlink(`${registered}.lock`);
-    await unlink(`${args.state}.lock`);
+    if (!states.size) await unlink(`${args.state}.lock`);
+    states.clear();
     if (response)
-      await new Promise<void>((resolve) => response.end("{}", resolve));
+      await new Promise<void>((resolve) =>
+        response.end(JSON.stringify({ released: true, remaining: 0 }), resolve),
+      );
     server.closeAllConnections();
   }
   process.once("SIGTERM", () => {
-    void shutdown().then(() => process.exit(0));
+    void lifecycle.then(() => shutdown()).then(() => process.exit(0));
   });
   process.once("SIGINT", () => {
-    void shutdown().then(() => process.exit(0));
+    void lifecycle.then(() => shutdown()).then(() => process.exit(0));
   });
   try {
     console.error("Connecting to Chrome");
@@ -396,7 +445,7 @@ async function serve(): Promise<void> {
     const client = await CDP({ target: socket, local: true });
     capture = new Capture(client, options);
     client.on("disconnect", () => {
-      void shutdown();
+      void lifecycle.then(() => shutdown());
     });
     capture.on("startup", (phase) => console.error(phase));
     await capture.start();
@@ -409,7 +458,7 @@ async function serve(): Promise<void> {
       server.listen(0, "127.0.0.1", resolve);
     });
     const address = server.address() as { port: number };
-    const state: State = {
+    state = {
       pid: process.pid,
       url: `http://127.0.0.1:${address.port}`,
       token,
@@ -417,18 +466,29 @@ async function serve(): Promise<void> {
       endpoint: socket,
       options: capture.options,
     };
-    await writeFile(`${args.state}.tmp`, JSON.stringify(state), {
-      mode: 0o600,
-    });
-    await rename(`${args.state}.tmp`, args.state);
-    stateWritten = true;
-    await writeFile(registered, JSON.stringify(state), { mode: 0o600 });
+    await (lifecycle = lifecycle.then(async () => {
+      await writeState(args.state, state);
+      states.add(resolve(args.state));
+      await writeState(registered!, state);
+    }));
     process.send?.({ ready: true });
     process.disconnect?.();
   } catch (error) {
     await shutdown();
     throw error;
   }
+}
+
+async function writeState(file: string, state: State): Promise<void> {
+  await writeFile(`${file}.tmp`, JSON.stringify(state), { mode: 0o600 });
+  await rename(`${file}.tmp`, file);
+}
+
+async function readState(file: string): Promise<State | undefined> {
+  const data = await readFile(file, "utf8").catch((error) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+  return data ? (JSON.parse(data) as State) : undefined;
 }
 
 async function api(
@@ -464,13 +524,8 @@ async function start(): Promise<void> {
   const socket = await endpoint();
   const files = [...new Set([args.state, registration(socket)])];
   for (const file of files) {
-    const existing = await readFile(file, "utf8").catch((error) => {
-      if (error.code === "ENOENT") return undefined;
-      throw error;
-    });
-    if (!existing) continue;
-    const state = JSON.parse(existing) as State;
-    const response = await api("/status", "GET", undefined, state);
+    const state = await readState(file);
+    if (!state) continue;
     if (
       state.endpoint !== socket ||
       JSON.stringify(state.options) !== JSON.stringify(captureOptions())
@@ -478,11 +533,11 @@ async function start(): Promise<void> {
       throw new Error(
         `Existing daemon settings differ. Reuse its scope and data mode at --state ${state.state || file}`,
       );
-    if (resolve(args.state) !== state.state && file !== args.state) {
-      await mkdir(dirname(args.state), { recursive: true, mode: 0o700 });
-      await writeFile(args.state, existing, { mode: 0o600, flag: "wx" });
-    }
-    console.log(await response.text());
+    console.log(
+      await (
+        await api("/attach", "POST", { state: resolve(args.state) }, state)
+      ).text(),
+    );
     return;
   }
   await mkdir(dirname(args.state), { recursive: true, mode: 0o700 });
@@ -591,6 +646,17 @@ async function main(): Promise<void> {
   if (command === "serve") return serve();
   if (command === "start") return start();
   if (command === "replay") return replay();
+  if (command === "stop") {
+    const state = await readState(args.state);
+    console.log(
+      state
+        ? await (
+            await api("/stop", "POST", { state: resolve(args.state) }, state)
+          ).text()
+        : JSON.stringify({ released: false }),
+    );
+    return;
+  }
   if (command === "cdp") {
     if (!id || args.target.length > 1)
       throw new Error("cdp requires METHOD and at most one --target ID");
@@ -658,21 +724,12 @@ async function main(): Promise<void> {
   const routes: Record<string, string> = {
     status: "/status",
     targets: "/targets",
-    stop: "/stop",
     requests: "/requests",
     show: `/requests/${id}`,
   };
   if (!routes[command]) throw new Error(`Unknown command: ${command}`);
-  const response = await api(
-    routes[command],
-    command === "stop" ? "POST" : "GET",
-  );
+  const response = await api(routes[command]);
   const data = await response.json();
-  if (command === "stop") {
-    await unlink(args.state).catch((error) => {
-      if (error.code !== "ENOENT") throw error;
-    });
-  }
   console.log(
     JSON.stringify(
       command === "requests"
