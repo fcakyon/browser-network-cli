@@ -13,11 +13,12 @@ import {
 import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFile } from "node:child_process";
-import { once } from "node:events";
+import { EventEmitter, once } from "node:events";
+import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import CDP from "chrome-remote-interface";
-import { WebSocketServer } from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 
 const exec = promisify(execFile);
 const executable = process.env.CHROME_PATH;
@@ -31,6 +32,37 @@ async function until(check) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for observable capture state");
+}
+
+function createTunnel(port, observe) {
+  return createProxy({ allowHalfOpen: true }, (inbound) => {
+    const upstream = connect({ port, host: "127.0.0.1", allowHalfOpen: true });
+    const connection = {
+      inbound,
+      upstream,
+      hold: false,
+      chunks: [],
+      ended: false,
+      release() {
+        this.hold = false;
+        for (const chunk of this.chunks.splice(0)) this.inbound.write(chunk);
+        if (this.ended) this.inbound.end();
+      },
+    };
+    observe(connection);
+    inbound.pipe(upstream);
+    upstream.on("data", (chunk) => {
+      if (connection.hold) {
+        connection.chunks.push(chunk);
+        upstream.emit("held-data");
+      } else inbound.write(chunk);
+    });
+    inbound.on("close", () => upstream.destroy());
+    upstream.on("end", () => {
+      connection.ended = true;
+      if (!connection.hold) inbound.end();
+    });
+  });
 }
 
 test(
@@ -110,7 +142,7 @@ test(
     );
     await writeFile(
       join(extension, "worker.js"),
-      `fetch(${JSON.stringify(base + "/startup")}); chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json'}, body:'{"fixture":"extension-worker"}'})).text();};`,
+      `fetch(${JSON.stringify(base + "/startup")}); chrome.runtime.onMessage.addListener(()=>{}); self.probe = async (url) => {await chrome.cookies.set({url:${JSON.stringify(base)}, name:'fixture_cookie', value:'cookie-secret', httpOnly:true}); return await (await fetch(url, {method:'POST', credentials:'include', headers:{Authorization:'Bearer auth-secret', 'Content-Type':'application/json', 'X-Fixture-URL':url}, body:'{"fixture":"extension-worker"}'})).text();};`,
     );
     const profile = join(root, "profile");
     const chromeLog = join(root, "chrome.log");
@@ -146,6 +178,7 @@ test(
     let cdp,
       proxy,
       tunnel,
+      relay,
       daemon = false;
     t.after(async () => {
       if (daemon)
@@ -165,6 +198,8 @@ test(
         });
       await cdp?.close();
       proxy?.close();
+      for (const client of relay?.clients || []) client.terminate();
+      relay?.close();
       if (
         chrome.pid &&
         chrome.exitCode === null &&
@@ -204,29 +239,59 @@ test(
     });
     cdp = await CDP({ target: socket, local: true });
     let connections = 0;
-    proxy = createProxy((inbound) => {
+    const earlyRequests = new Map();
+    const reorderUrls = new Set([
+      base + "/echo?token=query-secret",
+      base.replace("127.0.0.1", "localhost") + "/outside",
+    ]);
+    relay = new WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await once(relay, "listening");
+    relay.on("connection", (downstream) => {
+      const upstream = new WebSocket(socket);
+      const ready = once(upstream, "open");
+      const held = new Map();
+      const extras = new Map();
+      downstream.on("message", async (data) => {
+        await ready;
+        upstream.send(data.toString());
+      });
+      upstream.on("message", (data) => {
+        const text = data.toString();
+        const message = JSON.parse(text);
+        const key = message.sessionId + ":" + message.params?.requestId;
+        const extra =
+          message.method === "Network.requestWillBeSentExtraInfo" ||
+          message.method === "Network.responseReceivedExtraInfo";
+        if (extra) extras.set(key, (extras.get(key) || 0) + 1);
+        if (
+          message.method === "Network.requestWillBeSent" &&
+          reorderUrls.delete(message.params.request.url)
+        )
+          held.set(key, {
+            url: message.params.request.url,
+            messages: [],
+          });
+        const request = held.get(key);
+        if (request) {
+          if (extra) downstream.send(text);
+          else request.messages.push(text);
+          if (extras.get(key) === 2)
+            earlyRequests.set(request.url, () => {
+              for (const event of request.messages) downstream.send(event);
+              held.delete(key);
+              extras.delete(key);
+              earlyRequests.delete(request.url);
+            });
+        } else downstream.send(text);
+        if (message.method === "Network.loadingFinished" && !request)
+          extras.delete(key);
+      });
+      downstream.on("close", () => upstream.close());
+      upstream.on("close", () => downstream.close());
+    });
+    proxy = createTunnel(relay.address().port, (connection) => {
       connections++;
-      const upstream = connect(Number(new URL(socket).port), "127.0.0.1");
-      const connection = {
-        inbound,
-        upstream,
-        hold: false,
-        chunks: [],
-        ended: false,
-      };
       tunnel = connection;
-      inbound.pipe(upstream);
-      upstream.on("data", (chunk) => {
-        if (connection.hold) {
-          connection.chunks.push(chunk);
-          upstream.emit("held-data");
-        } else inbound.write(chunk);
-      });
-      inbound.on("close", () => upstream.destroy());
-      upstream.on("close", () => {
-        connection.ended = true;
-        if (!connection.hold) inbound.end();
-      });
     });
     await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
     const captureSocket = new URL(socket);
@@ -267,10 +332,7 @@ test(
       } finally {
         clearTimeout(timeout);
         controller.abort();
-        current.hold = false;
-        for (const chunk of current.chunks.splice(0))
-          current.inbound.write(chunk);
-        if (current.ended) current.inbound.end();
+        current.release();
       }
       await stopping;
       daemon = false;
@@ -385,7 +447,23 @@ test(
     });
     const reader = stream.body.getReader();
     await reader.read();
+    await completed(base + "/startup", true);
+    const beforeEarly = await call("requests");
     await probe(`${base}/echo?token=query-secret`);
+    const releaseEarly = await until(() =>
+      earlyRequests.get(base + "/echo?token=query-secret"),
+    );
+    await call("cdp", "Browser.getVersion");
+    assert.deepEqual(await call("requests"), beforeEarly);
+    assert.equal(
+      (await call("status")).lastRequestId,
+      beforeEarly.at(-1)?.id || "0",
+    );
+    const privateExport = await fetch(connection.url + "/export", {
+      headers: { Authorization: `Bearer ${connection.token}` },
+    });
+    assert.ok(!(await privateExport.text()).includes("query-secret"));
+    releaseEarly();
     const event = await reader.read();
     assert.match(new TextDecoder().decode(event.value), /data: /);
     streamAbort.abort();
@@ -653,7 +731,18 @@ test(
     );
     const anotherClient = await call("requests");
     assert.ok(anotherClient.some((row) => row.id === captured.id));
-    await probe(`${base.replace("127.0.0.1", "localhost")}/outside`);
+    const outsideUrl = base.replace("127.0.0.1", "localhost") + "/outside";
+    const beforeOutside = await call("requests");
+    await probe(outsideUrl);
+    const releaseOutside = await until(() => earlyRequests.get(outsideUrl));
+    await call("cdp", "Browser.getVersion");
+    assert.deepEqual(await call("requests"), beforeOutside);
+    releaseOutside();
+    await call("cdp", "Browser.getVersion");
+    const scopedExport = await fetch(connection.url + "/export", {
+      headers: { Authorization: `Bearer ${connection.token}` },
+    });
+    assert.ok(!(await scopedExport.text()).includes("/outside"));
     assert.ok(
       !(await call("requests")).some((row) => row.url.includes("/outside")),
     );
@@ -720,10 +809,14 @@ test(
       call("cdp", "Browser.getVersion"),
       /requires --sensitive/,
     );
+    reorderUrls.add(base + "/echo?token=query-secret");
     await probe(`${base}/echo?token=query-secret`);
+    (await until(() => earlyRequests.get(base + "/echo?token=query-secret")))();
     const redacted = await until(async () => {
       const rows = await call("requests");
-      return rows[0]?.complete && (await call("show", rows[0].id));
+      if (!rows[0]?.complete) return;
+      const entry = await call("show", rows[0].id);
+      return entry.wireHeaders && entry;
     });
     const text = JSON.stringify(redacted);
     for (const secret of [
@@ -953,4 +1046,120 @@ test("CLI help and unknown command are usable without a browser", async () => {
     exec(process.execPath, [cli, "unknown-command"]),
     /Unknown command/,
   );
+});
+
+test(
+  "proxy forwards input after upstream FIN and holds output EOF",
+  { timeout: 5000 },
+  async (t) => {
+    const server = createProxy({ allowHalfOpen: true });
+    const sockets = [];
+    t.after(() => {
+      for (const socket of sockets) socket.destroy();
+      proxy.close();
+      server.close();
+    });
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    let tunnel;
+    const proxy = createTunnel(server.address().port, (connection) => {
+      tunnel = connection;
+      connection.hold = true;
+      sockets.push(connection.inbound, connection.upstream);
+    });
+    await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+    const accepted = once(server, "connection");
+    const client = connect({
+      port: proxy.address().port,
+      host: "127.0.0.1",
+      allowHalfOpen: true,
+    });
+    sockets.push(client);
+    const [upstream] = await accepted;
+    sockets.push(upstream);
+    const fin = once(tunnel.upstream, "end");
+    upstream.end("held output");
+    await fin;
+    const input = once(upstream, "data");
+    client.end("input after FIN");
+    assert.equal((await input)[0].toString(), "input after FIN");
+    assert.equal(client.readableEnded, false);
+    const output = [];
+    client.on("data", (chunk) => output.push(chunk));
+    const ended = once(client, "end");
+    tunnel.release();
+    await ended;
+    assert.equal(Buffer.concat(output).toString(), "held output");
+  },
+);
+
+test("pending headers are bounded, scoped and cleared on session detach", async () => {
+  const { Capture } = await import(new URL("./capture.js", pathToFileURL(cli)));
+  const target = {
+    targetId: "worker",
+    type: "service_worker",
+    url: "http://allowed.test/",
+  };
+  const client = Object.assign(new EventEmitter(), {
+    Target: {
+      setDiscoverTargets: async () => {},
+      getTargets: async () => ({ targetInfos: [target] }),
+      getTargetInfo: async () => ({ targetInfo: target }),
+      attachToTarget: async () => ({ sessionId: "session" }),
+    },
+    send: async () => ({}),
+    close: async () => {},
+  });
+  const capture = new Capture(client, {
+    hosts: ["allowed.test"],
+    extensions: [],
+    targetIds: [],
+    pauseWorkers: false,
+    sensitive: true,
+    limit: 500,
+    bodyLimit: 1024,
+  });
+  await capture.start();
+  const emitted = [];
+  capture.on("request", (event) => emitted.push(event));
+  const event = (method, requestId, params = {}) =>
+    client.emit("event", {
+      method: "Network." + method,
+      sessionId: "session",
+      params: { requestId, ...params },
+    });
+  const extra = (id, value = "pending-secret") =>
+    event("requestWillBeSentExtraInfo", id, { headers: { Cookie: value } });
+  const request = (id, url = target.url) => {
+    event("requestWillBeSent", id, {
+      request: { url, method: "GET", headers: {} },
+      type: "Fetch",
+      wallTime: 1,
+    });
+    return [...capture.entries.values()].at(-1);
+  };
+  for (let id = 0; id < 129; id++) extra(String(id));
+  assert.equal(capture.entries.size, 0);
+  assert.equal(capture.status().requests, 0);
+  assert.deepEqual(emitted, []);
+  assert.equal(request("0").wireHeaders, undefined);
+  assert.equal(request("128").requestHeaders.Cookie, "pending-secret");
+  extra("oversize", "s".repeat(65536));
+  assert.equal(request("oversize").wireHeaders, undefined);
+  extra("outside");
+  request("outside", "http://outside.test/");
+  extra("outside", "late-secret");
+  assert.equal(request("outside").wireHeaders, undefined);
+  extra("detached");
+  client.emit("event", {
+    method: "Target.detachedFromTarget",
+    params: { sessionId: "session" },
+  });
+  await capture.cdp("Runtime.evaluate", {}, target.targetId);
+  assert.equal(request("detached").wireHeaders, undefined);
+  capture.options.sensitive = false;
+  extra("redacted", "s".repeat(65536));
+  const redacted = request("redacted");
+  assert.equal(redacted.wireHeaders, true);
+  assert.deepEqual(redacted.requestHeaders, {});
+  await capture.close();
 });
