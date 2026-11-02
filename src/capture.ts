@@ -57,7 +57,7 @@ export class Capture extends EventEmitter {
   readonly errors: string[] = [];
   private groups = new Map<string, Group>();
   private sessions = new Map<string, Target>();
-  private attaching = new Set<string>();
+  private attaching = new Map<string, Promise<void>>();
   private sequence = 0;
   private evicted = 0;
   private pending = new Set<Promise<void>>();
@@ -221,7 +221,17 @@ export class Capture extends EventEmitter {
     this.emit("startup", "Capture ready");
   }
 
-  private async attach(info: Target): Promise<void> {
+  private attach(info: Target): Promise<void> {
+    const pending = this.attaching.get(info.targetId);
+    if (pending) return pending;
+    const task = this.attachTarget(info).finally(() =>
+      this.attaching.delete(info.targetId),
+    );
+    this.attaching.set(info.targetId, task);
+    return task;
+  }
+
+  private async attachTarget(info: Target): Promise<void> {
     if (this.options.pauseWorkers && info.type === "service_worker") return;
     const existing = this.targets.get(info.targetId);
     if (!this.selected(info)) {
@@ -239,8 +249,7 @@ export class Capture extends EventEmitter {
       this.sessions.set(existing.sessionId, info);
       return;
     }
-    if (this.closed || this.attaching.has(info.targetId)) return;
-    this.attaching.add(info.targetId);
+    if (this.closed) return;
     let sessionId: string | undefined;
     try {
       this.emit("startup", `Attaching ${info.type}`);
@@ -261,8 +270,6 @@ export class Capture extends EventEmitter {
         );
       }
       this.note(error);
-    } finally {
-      this.attaching.delete(info.targetId);
     }
   }
 
@@ -292,6 +299,39 @@ export class Capture extends EventEmitter {
         url: this.url(info.url),
         attached: this.targets.has(info.targetId),
       }));
+  }
+
+  async cdp(
+    method: string,
+    params: Record<string, unknown> = {},
+    targetId?: string,
+  ) {
+    if (!this.options.sensitive)
+      throw new Error(
+        "CDP passthrough requires --sensitive: results are not redacted",
+      );
+    if (!targetId) {
+      if (method !== "Browser.getVersion")
+        throw new Error(
+          "Browser-level CDP only supports Browser.getVersion. Choose a scoped targetId",
+        );
+      return this.client.Browser.getVersion();
+    }
+    if (/^(Target|Browser)\./.test(method))
+      throw new Error("Target and Browser routing belongs to the daemon");
+    const { targetInfo } = await this.client.Target.getTargetInfo({ targetId });
+    if (!this.selected(targetInfo))
+      throw new Error("Target is outside capture scope");
+    await this.attach(targetInfo);
+    const target = this.targets.get(targetId);
+    if (!target) throw new Error("Target is not attached");
+    return (
+      this.client.send as (
+        method: string,
+        params: object,
+        sessionId: string,
+      ) => Promise<unknown>
+    )(method, params, target.sessionId);
   }
 
   async media(targetId: string, duration: number) {

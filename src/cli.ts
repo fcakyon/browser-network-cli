@@ -9,14 +9,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { tmpdir, userInfo } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import CDP from "chrome-remote-interface";
 import { Capture, type Entry } from "./capture.js";
 
+const stateDirectory = join(tmpdir(), `browser-network-${userInfo().username}`);
 const { values: args, positionals } = parseArgs({
   allowPositionals: true,
   options: {
@@ -25,6 +26,7 @@ const { values: args, positionals } = parseArgs({
     target: { type: "string", multiple: true, default: [] },
     "pause-workers": { type: "boolean", default: false },
     method: { type: "string" },
+    params: { type: "string", default: "{}" },
     status: { type: "string" },
     after: { type: "string", default: "0" },
     timeout: { type: "string", default: "10000" },
@@ -35,11 +37,7 @@ const { values: args, positionals } = parseArgs({
     sensitive: { type: "boolean", default: false },
     state: {
       type: "string",
-      default: join(
-        tmpdir(),
-        `browser-network-${userInfo().username}`,
-        "state.json",
-      ),
+      default: join(stateDirectory, "state.json"),
     },
     limit: { type: "string", default: "500" },
     "body-limit": { type: "string", default: "262144" },
@@ -50,7 +48,32 @@ const { values: args, positionals } = parseArgs({
   },
 });
 const [command = "help", id] = positionals;
-type State = { pid: number; url: string; token: string };
+type State = {
+  pid: number;
+  url: string;
+  token: string;
+  state: string;
+  endpoint: string;
+  options: Capture["options"];
+};
+const registry = join(stateDirectory, "connections");
+function registration(endpoint: string): string {
+  return join(
+    registry,
+    createHash("sha256").update(endpoint).digest("hex") + ".json",
+  );
+}
+function captureOptions(): Capture["options"] {
+  return {
+    hosts: [...new Set(args.host)].sort(),
+    extensions: [...new Set(args.extension)].sort(),
+    targetIds: [...new Set(args.target)].sort(),
+    pauseWorkers: args["pause-workers"],
+    sensitive: args.sensitive,
+    limit: Number(args.limit),
+    bodyLimit: Number(args["body-limit"]),
+  };
+}
 const { version } = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 ) as { version: string };
@@ -62,6 +85,7 @@ const help = `browser-network ${version}: shared local Chrome network capture
   wait --contains TEXT [--method POST] [--status 200] [--after ID] [--timeout MS]
   export --output PRIVATE_FILE.json
   media --target PAGE_ID [--duration MS]
+  cdp METHOD [--params JSON] [--target ID]
   replay ID --execute
 
 INSTALL
@@ -98,11 +122,18 @@ DATA
   droppedFrames counts older ones. No media decryption is performed.
 
 SHARING
+  start reuses a healthy daemon on the same endpoint with identical capture settings.
+  A scope, data-mode, or limit mismatch fails without another Chrome connection.
   All local Claude/Codex sessions can use the same daemon. --state selects its
   state file (default: ${args.state}). The file is mode 0600 and contains the
   local API bearer token. Capture data stays in memory and is cleared on stop.
   tail streams request summaries as JSON lines. show returns full retained data.
-  The localhost API: GET /status, /requests, /requests/ID, /events (SSE), POST /stop.
+  The localhost API: GET /status, /requests, /requests/ID, /events (SSE), /targets,
+  /wait, /media, /export, POST /cdp and /stop.
+  Agents must use POST /cdp {method, params, targetId?} for page CDP, never open
+  their own WebSocket to DevToolsActivePort. Requires --sensitive, returns raw
+  results and can change page state. Browser-level access is Browser.getVersion
+  only. Target/Browser routing is owned by the daemon. Use targets for discovery.
   Send Authorization: Bearer TOKEN from the state file. Browser origins are denied.
 
 REPLAY
@@ -147,13 +178,14 @@ async function endpoint(): Promise<string> {
     !["127.0.0.1", "localhost", "[::1]"].includes(socket.hostname)
   )
     throw new Error("Expected a local ws:// browser endpoint");
+  if (socket.hostname === "localhost") socket.hostname = "127.0.0.1";
   return socket.href;
 }
 
 async function serve(): Promise<void> {
   if (!args.host.length) throw new Error("At least one --host is required");
-  const limit = Number(args.limit),
-    bodyLimit = Number(args["body-limit"]);
+  const options = captureOptions();
+  const { limit, bodyLimit } = options;
   if (
     !Number.isInteger(limit) ||
     limit < 1 ||
@@ -178,12 +210,13 @@ async function serve(): Promise<void> {
   let capture: Capture | undefined;
   let stopping = false,
     stateWritten = false;
+  let registered: string | undefined;
   const clients = new Set<ServerResponse>();
   const token = randomBytes(32).toString("hex");
   const server = createServer((request, response) => {
     if (
       request.headers.authorization !== `Bearer ${token}` ||
-      request.headers.origin
+      request.headers.origin !== undefined
     ) {
       response.writeHead(403).end();
       return;
@@ -266,6 +299,29 @@ async function serve(): Promise<void> {
         .catch((error) =>
           response.writeHead(400).end(JSON.stringify({ error: error.message })),
         );
+    } else if (request.method === "POST" && path === "/cdp") {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) chunks.push(Buffer.from(chunk));
+        const { method, params, targetId } = JSON.parse(
+          Buffer.concat(chunks).toString(),
+        );
+        if (
+          typeof method !== "string" ||
+          !/^[A-Za-z]+\.[A-Za-z]+$/.test(method) ||
+          (params !== undefined &&
+            (!params || typeof params !== "object" || Array.isArray(params))) ||
+          (targetId !== undefined && typeof targetId !== "string")
+        )
+          throw new Error(
+            "Expected {method, params?: object, targetId?: string}",
+          );
+        response.end(
+          JSON.stringify(await capture!.cdp(method, params, targetId)),
+        );
+      })().catch((error) =>
+        response.writeHead(400).end(JSON.stringify({ error: error.message })),
+      );
     } else if (request.method === "GET" && path === "/export") {
       response.end(
         JSON.stringify({
@@ -309,7 +365,11 @@ async function serve(): Promise<void> {
     for (const client of clients) client.end();
     server.close();
     await capture?.close();
-    if (stateWritten) await unlink(args.state);
+    if (stateWritten) {
+      await unlink(args.state);
+      await unlink(registered!);
+    }
+    if (registered) await unlink(`${registered}.lock`);
     await unlink(`${args.state}.lock`);
     if (response)
       await new Promise<void>((resolve) => response.end("{}", resolve));
@@ -323,16 +383,18 @@ async function serve(): Promise<void> {
   });
   try {
     console.error("Connecting to Chrome");
-    const client = await CDP({ target: await endpoint(), local: true });
-    capture = new Capture(client, {
-      hosts: args.host,
-      extensions: args.extension,
-      targetIds: args.target,
-      pauseWorkers: args["pause-workers"],
-      sensitive: args.sensitive,
-      limit,
-      bodyLimit,
-    });
+    const socket = await endpoint();
+    await mkdir(registry, { recursive: true, mode: 0o700 });
+    const connectionLock = await open(
+      `${registration(socket)}.lock`,
+      "wx",
+      0o600,
+    );
+    registered = registration(socket);
+    await connectionLock.writeFile(String(process.pid));
+    await connectionLock.close();
+    const client = await CDP({ target: socket, local: true });
+    capture = new Capture(client, options);
     client.on("disconnect", () => {
       void shutdown();
     });
@@ -351,12 +413,16 @@ async function serve(): Promise<void> {
       pid: process.pid,
       url: `http://127.0.0.1:${address.port}`,
       token,
+      state: resolve(args.state),
+      endpoint: socket,
+      options: capture.options,
     };
     await writeFile(`${args.state}.tmp`, JSON.stringify(state), {
       mode: 0o600,
     });
     await rename(`${args.state}.tmp`, args.state);
     stateWritten = true;
+    await writeFile(registered, JSON.stringify(state), { mode: 0o600 });
     process.send?.({ ready: true });
     process.disconnect?.();
   } catch (error) {
@@ -365,10 +431,16 @@ async function serve(): Promise<void> {
   }
 }
 
-async function api(path: string, method = "GET"): Promise<Response> {
-  const state = JSON.parse(await readFile(args.state, "utf8")) as State;
+async function api(
+  path: string,
+  method = "GET",
+  body?: unknown,
+  state?: State,
+): Promise<Response> {
+  state ||= JSON.parse(await readFile(args.state, "utf8")) as State;
   const response = await fetch(`${state.url}${path}`, {
     method,
+    body: body === undefined ? undefined : JSON.stringify(body),
     headers: { Authorization: `Bearer ${state.token}` },
     signal:
       path === "/events"
@@ -389,6 +461,30 @@ async function api(path: string, method = "GET"): Promise<Response> {
 }
 
 async function start(): Promise<void> {
+  const socket = await endpoint();
+  const files = [...new Set([args.state, registration(socket)])];
+  for (const file of files) {
+    const existing = await readFile(file, "utf8").catch((error) => {
+      if (error.code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!existing) continue;
+    const state = JSON.parse(existing) as State;
+    const response = await api("/status", "GET", undefined, state);
+    if (
+      state.endpoint !== socket ||
+      JSON.stringify(state.options) !== JSON.stringify(captureOptions())
+    )
+      throw new Error(
+        `Existing daemon settings differ. Reuse its scope and data mode at --state ${state.state || file}`,
+      );
+    if (resolve(args.state) !== state.state && file !== args.state) {
+      await mkdir(dirname(args.state), { recursive: true, mode: 0o700 });
+      await writeFile(args.state, existing, { mode: 0o600, flag: "wx" });
+    }
+    console.log(await response.text());
+    return;
+  }
   await mkdir(dirname(args.state), { recursive: true, mode: 0o700 });
   const log = await open(`${args.state}.log`, "w", 0o600);
   const child = spawn(
@@ -495,6 +591,20 @@ async function main(): Promise<void> {
   if (command === "serve") return serve();
   if (command === "start") return start();
   if (command === "replay") return replay();
+  if (command === "cdp") {
+    if (!id || args.target.length > 1)
+      throw new Error("cdp requires METHOD and at most one --target ID");
+    console.log(
+      await (
+        await api("/cdp", "POST", {
+          method: id,
+          params: JSON.parse(args.params),
+          targetId: args.target[0],
+        })
+      ).text(),
+    );
+    return;
+  }
   if (command === "wait") {
     const query = new URLSearchParams({
       contains: args.contains,
@@ -558,6 +668,11 @@ async function main(): Promise<void> {
     command === "stop" ? "POST" : "GET",
   );
   const data = await response.json();
+  if (command === "stop") {
+    await unlink(args.state).catch((error) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+  }
   console.log(
     JSON.stringify(
       command === "requests"

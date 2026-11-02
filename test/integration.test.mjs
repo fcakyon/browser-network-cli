@@ -200,7 +200,9 @@ test(
       return "ws://127.0.0.1:" + port + endpoint;
     });
     cdp = await CDP({ target: socket, local: true });
+    let connections = 0;
     proxy = createProxy((inbound) => {
+      connections++;
       const upstream = connect(Number(new URL(socket).port), "127.0.0.1");
       const connection = {
         inbound,
@@ -294,7 +296,7 @@ test(
         return (!wire || entry.wireHeaders) && entry;
       });
 
-    const started = await call(
+    const startArgs = [
       "start",
       "--cdp",
       captureSocket.href,
@@ -304,7 +306,8 @@ test(
       extensionId,
       "--sensitive",
       "--pause-workers",
-    );
+    ];
+    const started = await call(...startArgs);
     daemon = true;
     assert.equal(
       (await cdp.send("Extensions.loadUnpacked", { path: extension })).id,
@@ -435,11 +438,173 @@ test(
         .map(({ opcode, bytes, body }) => [opcode, bytes, body.data]),
       Array(2).fill([2, 4, "AQIDBA=="]),
     );
+    t.diagnostic("CDP passthrough and endpoint-wide start reuse");
+    const beforeReuse = connections;
+    assert.equal((await call(...startArgs)).pid, started.pid);
+    const sharedState = join(root, "shared.json");
+    const reused = await exec(process.execPath, [
+      cli,
+      ...startArgs,
+      "--state",
+      sharedState,
+    ]);
+    assert.equal(JSON.parse(reused.stdout).pid, started.pid);
+    assert.equal((await stat(sharedState)).mode & 0o777, 0o600);
+    assert.equal(
+      JSON.parse(
+        (await exec(process.execPath, [cli, "status", "--state", sharedState]))
+          .stdout,
+      ).pid,
+      started.pid,
+    );
     await assert.rejects(
-      call("start", "--cdp", socket, "--host", "127.0.0.1"),
-      /EEXIST/,
+      call("start", "--cdp", captureSocket.href, "--host", "localhost"),
+      /settings differ/,
+    );
+    await assert.rejects(
+      exec(process.execPath, [
+        cli,
+        "start",
+        "--cdp",
+        captureSocket.href,
+        "--host",
+        "localhost",
+        "--state",
+        join(root, "mismatch.json"),
+      ]),
+      /settings differ/,
+    );
+    assert.equal(
+      connections,
+      beforeReuse,
+      "start reuse or mismatch opened another Chrome connection",
     );
     assert.equal((await call("status")).pid, started.pid);
+    const post = (
+      body,
+      headers = { Authorization: `Bearer ${connection.token}` },
+    ) =>
+      fetch(connection.url + "/cdp", {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    const versionCommand = { method: "Browser.getVersion" };
+    assert.equal((await post(versionCommand, {})).status, 403);
+    assert.equal(
+      (
+        await post(versionCommand, {
+          Authorization: `Bearer ${connection.token}`,
+          Origin: "https://unrelated.test",
+        })
+      ).status,
+      403,
+    );
+    assert.equal(
+      (
+        await post(versionCommand, {
+          Authorization: `Bearer ${connection.token}`,
+          Origin: "",
+        })
+      ).status,
+      403,
+    );
+    assert.equal((await post({ method: 123 })).status, 400);
+    assert.equal(
+      (await post({ method: "Runtime.evaluate", params: [] })).status,
+      400,
+    );
+    assert.match((await (await post(versionCommand)).json()).product, /Chrome/);
+    const { targetId: page } = await cdp.Target.createTarget({
+      url: base + "/cdp",
+      background: true,
+    });
+    const { targetId: outside } = await cdp.Target.createTarget({
+      url: base.replace("127.0.0.1", "localhost") + "/cdp",
+      background: true,
+    });
+    try {
+      for (let i = 0; i < 3; i++) {
+        const result = await call(
+          "cdp",
+          "Runtime.evaluate",
+          "--params",
+          JSON.stringify({
+            expression: "location.hostname",
+            returnByValue: true,
+          }),
+          "--target",
+          page,
+        );
+        assert.equal(result.result.value, "127.0.0.1");
+      }
+      assert.equal(
+        (
+          await call(
+            "cdp",
+            "Runtime.evaluate",
+            "--params",
+            JSON.stringify({
+              expression: "typeof self.probe",
+              returnByValue: true,
+            }),
+            "--target",
+            worker.id,
+          )
+        ).result.value,
+        "function",
+      );
+      await assert.rejects(
+        call("cdp", "Runtime.evaluate", "--target", outside),
+        /outside capture scope/,
+      );
+      await assert.rejects(
+        call(
+          "cdp",
+          "Target.attachToTarget",
+          "--params",
+          JSON.stringify({ targetId: outside, flatten: true }),
+        ),
+        /Choose a scoped targetId/,
+      );
+      await assert.rejects(
+        call(
+          "cdp",
+          "Target.attachToTarget",
+          "--target",
+          page,
+          "--params",
+          JSON.stringify({ targetId: outside, flatten: true }),
+        ),
+        /routing belongs to the daemon/,
+      );
+      const { sessionId: pageSession } = await cdp.Target.attachToTarget({
+        targetId: page,
+        flatten: true,
+      });
+      await cdp.send(
+        "Page.navigate",
+        { url: base.replace("127.0.0.1", "localhost") + "/left-scope" },
+        pageSession,
+      );
+      await until(async () =>
+        (
+          await cdp.Target.getTargetInfo({ targetId: page })
+        ).targetInfo.url.includes("/left-scope"),
+      );
+      await assert.rejects(
+        call("cdp", "Runtime.evaluate", "--target", page),
+        /outside capture scope/,
+      );
+    } finally {
+      await cdp.Target.closeTarget({ targetId: page });
+      await cdp.Target.closeTarget({ targetId: outside });
+    }
+    assert.equal(
+      connections,
+      beforeReuse,
+      "CDP calls opened another Chrome connection",
+    );
     const anotherClient = await call("requests");
     assert.ok(anotherClient.some((row) => row.id === captured.id));
     await probe(`${base.replace("127.0.0.1", "localhost")}/outside`);
@@ -470,6 +635,10 @@ test(
       "2",
     );
     daemon = true;
+    await assert.rejects(
+      call("cdp", "Browser.getVersion"),
+      /requires --sensitive/,
+    );
     await probe(`${base}/echo?token=query-secret`);
     const redacted = await until(async () => {
       const rows = await call("requests");
@@ -647,6 +816,7 @@ test(
       "--target",
       targetId,
       "--pause-workers",
+      "--sensitive",
     );
     daemon = true;
     assert.deepEqual(
@@ -671,6 +841,10 @@ test(
       !(await call("requests")).some((row) => row.url.endsWith("/excluded")),
     );
     await assert.rejects(call("media", "--target", excluded), /attached page/);
+    await assert.rejects(
+      call("cdp", "Runtime.evaluate", "--target", excluded),
+      /outside capture scope/,
+    );
     await cdp.Target.closeTarget({ targetId: excluded });
     await cdp.Target.closeTarget({ targetId });
     const exited = once(chrome, "exit");
