@@ -10,7 +10,7 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { join, resolve } from "node:path";
 import { spawn, execFile } from "node:child_process";
 import { once } from "node:events";
@@ -53,6 +53,8 @@ test(
       .map((char) => String.fromCharCode(97 + parseInt(char, 16)))
       .join("");
     const state = join(root, "state.json");
+    const sharedState = join(root, "shared.json");
+    const concurrentState = join(root, "concurrent.json");
     await mkdir(extension);
     const received = [];
     const server = createServer(async (req, res) => {
@@ -147,9 +149,10 @@ test(
       daemon = false;
     t.after(async () => {
       if (daemon)
-        await exec(process.execPath, [cli, "stop", "--state", state]).catch(
-          () => {},
-        );
+        for (const path of [state, sharedState, concurrentState])
+          await exec(process.execPath, [cli, "stop", "--state", path]).catch(
+            () => {},
+          );
       if (cdp) await cdp.Browser.close().catch(() => {});
       if (process.env.CHROME_APP)
         await exec("/usr/bin/pkill", [
@@ -228,15 +231,23 @@ test(
     await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
     const captureSocket = new URL(socket);
     captureSocket.port = String(proxy.address().port);
+    const registration = join(
+      tmpdir(),
+      `browser-network-${userInfo().username}`,
+      "connections",
+      createHash("sha256").update(captureSocket.href).digest("hex") + ".json",
+    );
     let sessionId;
-    const call = async (...args) =>
+    const callAt = async (statePath, ...args) =>
       JSON.parse(
         (
-          await exec(process.execPath, [cli, ...args, "--state", state], {
+          await exec(process.execPath, [cli, ...args, "--state", statePath], {
             maxBuffer: 4 * 1024 * 1024,
           })
         ).stdout,
       );
+    const call = (...args) => callAt(state, ...args);
+    const sharedCall = (...args) => callAt(sharedState, ...args);
     const stopRecorder = async () => {
       const current = tunnel;
       const controller = new AbortController();
@@ -268,7 +279,14 @@ test(
         false,
         "stop acknowledged before Chrome detached",
       );
-      for (const file of [state, state + ".lock"])
+      for (const file of [
+        state,
+        state + ".lock",
+        sharedState,
+        sharedState + ".lock",
+        registration,
+        registration + ".lock",
+      ])
         await assert.rejects(stat(file), { code: "ENOENT" });
     };
     const probe = async (url) => {
@@ -441,22 +459,9 @@ test(
     t.diagnostic("CDP passthrough and endpoint-wide start reuse");
     const beforeReuse = connections;
     assert.equal((await call(...startArgs)).pid, started.pid);
-    const sharedState = join(root, "shared.json");
-    const reused = await exec(process.execPath, [
-      cli,
-      ...startArgs,
-      "--state",
-      sharedState,
-    ]);
-    assert.equal(JSON.parse(reused.stdout).pid, started.pid);
+    assert.equal((await sharedCall(...startArgs)).pid, started.pid);
     assert.equal((await stat(sharedState)).mode & 0o777, 0o600);
-    assert.equal(
-      JSON.parse(
-        (await exec(process.execPath, [cli, "status", "--state", sharedState]))
-          .stdout,
-      ).pid,
-      started.pid,
-    );
+    assert.equal((await sharedCall("status")).pid, started.pid);
     await assert.rejects(
       call("start", "--cdp", captureSocket.href, "--host", "localhost"),
       /settings differ/,
@@ -480,15 +485,56 @@ test(
       "start reuse or mismatch opened another Chrome connection",
     );
     assert.equal((await call("status")).pid, started.pid);
+    const released = await sharedCall("stop");
+    assert.equal((await call("status")).pid, started.pid);
+    assert.deepEqual(released, { released: true, remaining: 1 });
+    for (const file of [sharedState, sharedState + ".lock"])
+      await assert.rejects(stat(file), { code: "ENOENT" });
+    assert.deepEqual(await sharedCall("stop"), { released: false });
+    assert.equal((await stat(state + ".lock")).mode & 0o777, 0o600);
+    assert.equal((await stat(registration)).mode & 0o777, 0o600);
+    assert.equal((await stat(registration + ".lock")).mode & 0o777, 0o600);
+    assert.equal((await stat(join(registration, ".."))).mode & 0o777, 0o700);
+    await probe(base + "/after-release");
+    assert.equal((await completed(base + "/after-release")).status, 200);
     const post = (
       body,
       headers = { Authorization: `Bearer ${connection.token}` },
+      path = "/cdp",
     ) =>
-      fetch(connection.url + "/cdp", {
+      fetch(connection.url + path, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
       });
+    for (const path of ["/attach", "/stop"]) {
+      assert.equal((await post({}, undefined, path)).status, 400);
+      assert.equal(
+        (await post({ state: "relative.json" }, undefined, path)).status,
+        400,
+      );
+      assert.equal((await post({ state }, {}, path)).status, 403);
+      assert.equal(
+        (
+          await post(
+            { state },
+            { Authorization: `Bearer ${connection.token}`, Origin: "" },
+            path,
+          )
+        ).status,
+        403,
+      );
+    }
+    assert.deepEqual(
+      await (
+        await post(
+          { state: join(root, "unregistered.json") },
+          undefined,
+          "/stop",
+        )
+      ).json(),
+      { released: false, remaining: 1 },
+    );
     const versionCommand = { method: "Browser.getVersion" };
     assert.equal((await post(versionCommand, {})).status, 403);
     assert.equal(
@@ -617,7 +663,42 @@ test(
       call("replay", redirect.id, "--execute"),
       /without redirects/,
     );
+    await sharedCall(...startArgs);
+    assert.equal((await stat(sharedState + ".lock")).mode & 0o777, 0o600);
+    assert.equal(
+      JSON.parse(await readFile(sharedState, "utf8")).state,
+      sharedState,
+    );
+    assert.deepEqual(await call("stop"), { released: true, remaining: 1 });
+    assert.equal(
+      JSON.parse(await readFile(registration, "utf8")).state,
+      sharedState,
+    );
+    for (const file of [state, state + ".lock"])
+      await assert.rejects(stat(file), { code: "ENOENT" });
+    assert.equal((await sharedCall("status")).pid, started.pid);
+    assert.ok(
+      (await sharedCall("requests")).some((row) => row.id === captured.id),
+    );
+    assert.match(
+      (await sharedCall("cdp", "Browser.getVersion")).product,
+      /Chrome/,
+    );
+    // Concurrent releases and registrations must preserve the remaining caller.
+    await call(...startArgs);
+    await Promise.all([
+      callAt(concurrentState, ...startArgs),
+      sharedCall("stop"),
+    ]);
+    assert.deepEqual(await callAt(concurrentState, "stop"), {
+      released: true,
+      remaining: 1,
+    });
+    assert.equal((await call("status")).pid, started.pid);
+    assert.equal(JSON.parse(await readFile(registration, "utf8")).state, state);
+    assert.equal(connections, 1);
     await stopRecorder();
+    assert.deepEqual(await call("stop"), { released: false });
     assert.equal(
       (await cdp.Browser.getVersion()).product.startsWith("Chrome"),
       true,

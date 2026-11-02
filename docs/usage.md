@@ -69,11 +69,11 @@ Verify provider login, title access and decoded playback separately. Screen capt
 
 ## Share with agents
 
-One daemon shares a Chrome connection across local CLI and agent sessions. Agents must use its API for page CDP and never open their own WebSocket to `DevToolsActivePort`. Each new browser WebSocket can trigger another Chrome Allow prompt. `stop` waits for detachment and state-file cleanup, then leaves Chrome open.
+One daemon shares a Chrome connection across local CLI and agent sessions. Agents must use its API for page CDP and never open their own WebSocket to `DevToolsActivePort`. Each new browser WebSocket can trigger another Chrome Allow prompt. `stop` releases the selected state path and leaves Chrome open. Only the last registered state path stops the daemon, clears its in-memory evidence and waits for Chrome detachment and state, registry and lock cleanup before replying.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
 
-`start` resolves the profile or debugging endpoint before connecting and reuses a healthy daemon registered for that endpoint. Hosts, extensions and target IDs are compared as sets. Sensitive mode, worker pausing and retention limits must also match. Mismatches fail and report the owner state path without another Chrome connection. Reuse copies the connection details into a new `--state` file, so subsequent commands keep that selection. It shares the existing evidence and lifecycle, and `stop` stops the shared daemon. Only stop a daemon you own. State copies used by other clients become stale after shutdown and can be removed once that PID has exited. Older daemons without an endpoint registration cannot be discovered across state paths.
+`start` resolves the profile or debugging endpoint before connecting and reuses a healthy daemon registered for that endpoint. Hosts, extensions and target IDs are compared as sets. Sensitive mode, worker pausing and retention limits must also match. Mismatches fail and report the owner state path without another Chrome connection. Reuse registers the caller with the daemon and writes connection details to its `--state` file, so subsequent commands keep that selection. Use a separate state path for each agent that needs an independent lifetime. Repeated starts on the same path count as one caller. Registration and release run in order inside the daemon, and the endpoint registry points to a remaining caller when its first caller stops. Stopping a missing state path succeeds with `{"released":false}`. Older daemons without an endpoint registration cannot be discovered across state paths.
 
 The state file has owner-only permissions and contains the localhost API URL and bearer token. Treat that token as access to the current capture. API routes:
 
@@ -88,7 +88,8 @@ The state file has owner-only permissions and contains the localhost API URL and
 | GET | `/export` | Capture snapshot with loss metadata |
 | GET | `/media?target=ID&duration=MS` | Read-only video samples, 1–10,000 ms apart |
 | POST | `/cdp` | Raw CDP result for `{method, params?, targetId?}` |
-| POST | `/stop` | Stop capture and clear memory |
+| POST | `/attach` | Register `{state: absolute state path}` and write its state and lock files |
+| POST | `/stop` | Release `{state: absolute state path}`, stop capture only for the last caller |
 
 Send `Authorization: Bearer TOKEN`. Requests with a browser Origin header are denied. There is no public tunnel or remote bind option.
 
