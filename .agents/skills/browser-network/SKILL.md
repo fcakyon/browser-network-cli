@@ -9,7 +9,7 @@ Check `browser-network --help` for current flags. If missing, install the precom
 
 ## Connect and capture
 
-1. Check `browser-network status`. Reuse a running capture only when its scope and data mode fit the task and its owner agrees. For an independent capture, use a unique `--state PATH` on every command.
+1. Check `browser-network status`. Reuse a running capture only when its scope and data mode fit the task and its owner agrees. Repeated `start` calls reuse the same endpoint across state paths only when all capture settings match. Mismatches fail without another connection. Use the reported owner state and its settings. Another state path does not create an independent capture on that endpoint. Older daemons without this feature must be coordinated with their owner before replacement.
 2. In existing Chrome 144+, enable Remote Debugging at `chrome://inspect/#remote-debugging`. The user approves Chrome's connection prompt if shown. Do not restart Chrome or copy its profile to attach.
 3. Start with the profile root containing `DevToolsActivePort`, not its `Default` or `Profile 1` subdirectory. On macOS:
 
@@ -33,6 +33,15 @@ browser-network wait --contains /api/ --method POST --status 200 --after LAST_RE
 For bodies, cookies, authorization values or WebSocket payloads, choose `--sensitive` when starting capture. Default mode omits them. Repeat `--host` for separate API/CDN hosts. Each host includes its subdomains. Add `--extension ID` for extension background workers. Their destinations must also match the host scope.
 
 For startup evidence, use `--pause-workers` before loading the extension in a dedicated test browser. Use `media --target PAGE_ID` to inspect video without screen capture, which can disturb protected playback. Keep login, license and decoded-output checks separate.
+
+Use the daemon for page CDP too. Never open your own WebSocket to `DevToolsActivePort` or a separate recorder to avoid a scope mismatch, since each browser connection can trigger another Allow prompt. With a sensitive daemon:
+
+```sh
+browser-network cdp Runtime.evaluate --target PAGE_ID \
+  --params '{"expression":"document.title","returnByValue":true}'
+```
+
+The local equivalent is `POST /cdp` with `{method, params, targetId?}` and `Authorization: Bearer TOKEN` from the state file. Browser origins are denied. Results are unredacted and commands can change page state, so use only task-authorized commands and private output. Target selection uses the current capture scope. Without a target only `Browser.getVersion` is supported. Use `targets` for discovery and let the daemon own attachment and routing. CDP is a command API, not an event stream or a sandbox for arbitrary scripts.
 
 5. Save needed evidence with `export --output /private/path/capture.json` before stopping. Exports preserve the selected sensitive/redacted mode, refuse overwrite and include evicted-request counts. Sensitive `show` output belongs in an ignored private directory with `umask 077`, not shared terminal output or tracked files. Inspect field names, byte counts and redacted summaries instead of secrets. Use `browser-network stop` only for a capture you own. It clears in-memory evidence and leaves Chrome running. Close only temporary tabs and servers created for the task.
 

@@ -27,6 +27,7 @@ Capture uses existing Chrome sessions. It does not install Chrome, copy your pro
 | Request and response bodies | Omitted | Captured up to the size limit |
 | WebSocket frames | Direction and size | Payload included |
 | Replay | Disabled | Requires `--execute` |
+| CDP passthrough | Disabled | Raw results from scoped targets |
 
 URL paths remain visible in both modes and may contain private data. Sensitive captures can contain account credentials. Scope them to sites you intend to inspect.
 
@@ -68,9 +69,11 @@ Verify provider login, title access and decoded playback separately. Screen capt
 
 ## Share with agents
 
-One daemon shares a Chrome connection across local CLI and agent sessions. `stop` waits for detachment and state-file cleanup, then leaves Chrome open.
+One daemon shares a Chrome connection across local CLI and agent sessions. Agents must use its API for page CDP and never open their own WebSocket to `DevToolsActivePort`. Each new browser WebSocket can trigger another Chrome Allow prompt. `stop` waits for detachment and state-file cleanup, then leaves Chrome open.
 
 `--state PATH` selects a capture session. Without it, sessions use a per-user state file under the operating system's temporary directory. `browser-network --help` prints the path.
+
+`start` resolves the profile or debugging endpoint before connecting and reuses a healthy daemon registered for that endpoint. Hosts, extensions and target IDs are compared as sets. Sensitive mode, worker pausing and retention limits must also match. Mismatches fail and report the owner state path without another Chrome connection. Reuse copies the connection details into a new `--state` file, so subsequent commands keep that selection. It shares the existing evidence and lifecycle, and `stop` stops the shared daemon. Only stop a daemon you own. State copies used by other clients become stale after shutdown and can be removed once that PID has exited. Older daemons without an endpoint registration cannot be discovered across state paths.
 
 The state file has owner-only permissions and contains the localhost API URL and bearer token. Treat that token as access to the current capture. API routes:
 
@@ -84,9 +87,24 @@ The state file has owner-only permissions and contains the localhost API URL and
 | GET | `/wait?contains=TEXT&after=ID&timeout=MS` | Completed match, optional method/status filters |
 | GET | `/export` | Capture snapshot with loss metadata |
 | GET | `/media?target=ID&duration=MS` | Read-only video samples, 1–10,000 ms apart |
+| POST | `/cdp` | Raw CDP result for `{method, params?, targetId?}` |
 | POST | `/stop` | Stop capture and clear memory |
 
 Send `Authorization: Bearer TOKEN`. Requests with a browser Origin header are denied. There is no public tunnel or remote bind option.
+
+### Page CDP
+
+```sh
+browser-network cdp Runtime.evaluate --target PAGE_ID \
+  --params '{"expression":"document.title","returnByValue":true}'
+browser-network cdp Browser.getVersion
+```
+
+`POST /cdp` requires a daemon started with `--sensitive`. Arbitrary protocol results cannot be reliably redacted, so results are returned unchanged and are not added to the capture store. Treat them as private. Invalid commands, out-of-scope targets and Chrome protocol failures return 400. Authentication and Origin checks run before reading the body.
+
+Use `targets` for discovery. The daemon checks the target's current URL against host, extension and target-ID scope, attaches when needed, and sends through its existing flattened session. `Target.*` and `Browser.*` commands cannot be sent through a target. Without `targetId`, only browser-level `Browser.getVersion` is supported. The API returns command responses, not a CDP event stream. Capture events remain available through `/events`.
+
+CDP commands can run scripts, navigate and change page state. Host scope controls target selection and captured destinations, not every effect of arbitrary scripts or protocol commands. Only run commands authorized for the task. Navigation outside scope makes subsequent calls fail.
 
 If the process is forcibly killed, a stale state or lock file may remain. Check the recorded PID before removing those files. Do not remove another running capture's lock.
 
@@ -98,7 +116,7 @@ npm run build
 CHROME_PATH="/path/to/Chrome for Testing" npm test
 ```
 
-The integration test uses an isolated Manifest V3 extension and a local server with synthetic credentials. It checks worker capture, Cookie/Authorization and body retention, replay, WebSockets, redaction, host scope, API authentication, eviction, and daemon lifecycle. It never uses your browsing profile.
+The integration test uses an isolated Manifest V3 extension and a local server with synthetic credentials. It checks worker capture, Cookie/Authorization and body retention, replay, WebSockets, redaction, host scope, API authentication, eviction, scoped page/worker CDP, endpoint-wide start reuse without new connections, and daemon lifecycle. It never uses your browsing profile.
 
 macOS CI uses `CHROME_APP` to launch headless Chrome through LaunchServices with its sandbox enabled. Linux CI sets `CHROME_NO_SANDBOX=1` for localhost fixtures only. The CLI never changes browser sandbox settings.
 

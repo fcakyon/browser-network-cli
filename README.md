@@ -53,6 +53,19 @@ Add `--extension ID` to capture an extension's background requests. Add `--sensi
 
 Capture is scoped to the hosts you select. Export evidence before stopping. For service-worker startup requests, use `--pause-workers` only in a dedicated test browser before loading the extension. Media inspection reads video state without screenshots.
 
+## Local API
+
+Agents must use the daemon API for page CDP. Never open a separate WebSocket to `DevToolsActivePort`, which can trigger another Chrome Allow prompt. Start with `--sensitive`, then use the existing connection:
+
+```sh
+browser-network cdp Runtime.evaluate --target PAGE_ID \
+  --params '{"expression":"document.title","returnByValue":true}'
+```
+
+The equivalent request is `POST /cdp` with `{method, params, targetId?}`, using the bearer token from the owner-only state file. Browser origins are denied. Results are raw and commands can change page state. Targets must match capture scope. Without a target, only `Browser.getVersion` is supported.
+
+Repeated `start` calls reuse a healthy daemon for the same endpoint, including across state paths, when all capture settings match. Mismatches fail without opening another connection. See [sharing and API limits](docs/usage.md#share-with-agents).
+
 [Agent skill](.agents/skills/browser-network/SKILL.md) · [Usage and limitations](docs/usage.md) · [Releases](https://github.com/fcakyon/browser-network-cli/releases) · [MIT license](LICENSE)
 
 Built on [chrome-remote-interface](https://github.com/cyrus-and/chrome-remote-interface).
