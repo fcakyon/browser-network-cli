@@ -47,7 +47,7 @@ Replay makes a **real request** with captured credentials. It does not follow re
 - Chrome may discard response bodies, serve cached responses without all events, or omit upload data. Missing bodies are reported explicitly.
 - No media decryption is performed.
 
-Default limits: **500 requests**, **256 KiB per body**, and **64 MiB of serialized capture data**. WebSockets retain their latest 100 frames, and `droppedFrames` counts older ones. Old requests are evicted when limits are reached. Use `--limit` and `--body-limit` to adjust the first two limits.
+Default limits: **500 requests**, **256 KiB per body**, and **64 MiB of serialized capture data**. WebSockets retain their latest 100 frames, and `droppedFrames` counts older ones. Early headers stay private until a matching request URL is in scope. This pending store holds at most 128 request groups of 64 KiB each, discards older or oversized groups, and clears on session detach. Old requests are evicted when limits are reached. Use `--limit` and `--body-limit` to adjust the first two limits.
 
 ## Scripted checks
 

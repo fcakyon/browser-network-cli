@@ -46,6 +46,7 @@ export type Entry = {
   droppedFrames?: number;
 };
 type Group = {
+  rejected?: boolean;
   entries: (Entry | undefined)[];
   requestExtras: (Headers | undefined)[];
   responseExtras: ({ headers: Headers; status: number } | undefined)[];
@@ -56,6 +57,7 @@ export class Capture extends EventEmitter {
   readonly targets = new Map<string, { info: Target; sessionId: string }>();
   readonly errors: string[] = [];
   private groups = new Map<string, Group>();
+  private pendingGroups = new Map<string, Group>();
   private sessions = new Map<string, Target>();
   private attaching = new Map<string, Promise<void>>();
   private sequence = 0;
@@ -174,6 +176,14 @@ export class Capture extends EventEmitter {
       complete: entry.complete,
       target: entry.target,
     });
+  }
+
+  private retainPending(key: string, group: Group): void {
+    this.pendingGroups.delete(key);
+    if (Buffer.byteLength(JSON.stringify(group)) > 64 * 1024) return;
+    this.pendingGroups.set(key, group);
+    if (this.pendingGroups.size > 128)
+      this.pendingGroups.delete(this.pendingGroups.keys().next().value!);
   }
 
   private correlate(group: Group): void {
@@ -396,6 +406,8 @@ export class Capture extends EventEmitter {
       const info = this.sessions.get(detached);
       if (info) this.targets.delete(info.targetId);
       this.sessions.delete(detached);
+      for (const key of this.pendingGroups.keys())
+        if (key.startsWith(detached + ":")) this.pendingGroups.delete(key);
       return;
     }
     const info = sessionId && this.sessions.get(sessionId);
@@ -403,11 +415,12 @@ export class Capture extends EventEmitter {
     const requestId = (params as { requestId?: string }).requestId;
     if (!requestId) return;
     const key = `${sessionId}:${requestId}`;
-    const group = this.groups.get(key) || {
-      entries: [],
-      requestExtras: [],
-      responseExtras: [],
-    };
+    const group = this.groups.get(key) ||
+      this.pendingGroups.get(key) || {
+        entries: [],
+        requestExtras: [],
+        responseExtras: [],
+      };
     const entry = group.entries.at(-1);
     if (
       method === "Network.requestWillBeSent" ||
@@ -418,7 +431,18 @@ export class Capture extends EventEmitter {
       const url = socket
         ? (params as Protocol.Network.WebSocketCreatedEvent).url
         : event.request.url;
-      if (!this.matches(url)) return;
+      if (!this.matches(url)) {
+        this.groups.delete(key);
+        this.retainPending(key, {
+          rejected: true,
+          entries: [],
+          requestExtras: [],
+          responseExtras: [],
+        });
+        return;
+      }
+      this.pendingGroups.delete(key);
+      delete group.rejected;
       if (entry && event.redirectResponse) {
         entry.redirected = true;
         entry.complete = true;
@@ -466,8 +490,7 @@ export class Capture extends EventEmitter {
       method === "Network.requestWillBeSentExtraInfo" ||
       method === "Network.responseReceivedExtraInfo"
     ) {
-      // Do not retain headers before a permitted request URL is known.
-      if (!entry) return;
+      if (group.rejected) return;
       if (method === "Network.requestWillBeSentExtraInfo")
         group.requestExtras.push(
           this.headers(
@@ -482,7 +505,8 @@ export class Capture extends EventEmitter {
           status: event.statusCode,
         });
       }
-      this.correlate(group);
+      if (entry) this.correlate(group);
+      else this.retainPending(key, group);
       return;
     }
     if (!entry) return;
@@ -583,6 +607,7 @@ export class Capture extends EventEmitter {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.pendingGroups.clear();
     await this.client.close();
   }
 }

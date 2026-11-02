@@ -9,6 +9,7 @@ Give any shell-enabled coding agent a reusable view of website and Chrome extens
 - Reuse chrome-remote-interface. Keep runtime dependencies small. This is a Chrome recorder, not an operating-system proxy or video decryptor.
 - The daemon owns registered state paths. Serialize registration and release, keep the endpoint registry pointed at a remaining caller, and detach Chrome only after the last caller stops.
 - Extension service-worker capture is a core requirement. Verify it with a real extension, not only page traffic or mocked protocol events.
+- Correlate CDP ExtraInfo in either event order. Keep early headers private until URL scope is known, bound pending storage, and discard it on rejection or detach.
 - Cookies, authorization, bodies, and frame payloads require opt-in sensitive capture. Never commit real captures, credentials, browser profiles, or state files.
 - Replay sends real requests and requires an explicit execute flag. Preserve host and extension scope.
 - Prefer deleting duplication over adding wrappers or frameworks. Keep tests focused on observable failures and actual CLI behavior.
